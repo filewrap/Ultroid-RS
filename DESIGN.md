@@ -222,15 +222,17 @@ data.
 
 ## Build status (2026-11-13)
 
-Committed (local, not yet pushed), 13 commits: `4d436fe` core+rich+vc,
+Committed (local, not yet pushed), 14 commits: `4d436fe` core+rich+vc,
 `e4f4b14` agent, `d2c7886` web, `8c23758` assistant,
 `3b56e60` plugins wave B, `5600ca9` binary crate, `a3d86ca` vc
 resolver/downloader, `f8fd0e1` plugin waves A/C/D/G, `76e132c`
 plugin waves E/F (all 102 plugins on the registry), `c79aff5`
 help wiring (`.help <plugin|command>` for real), `bcd9733`
 responder-op trait + grammers impl (43 methods), plus the wiring
-wave (Responder ops wired at ~200 plugin sites) and the VC actor +
-inline engine (group-call ops, `Ctx.vc`, `inline.rs` dispatcher).
+wave (Responder ops wired at ~200 plugin sites), the VC actor +
+inline engine (group-call ops, `Ctx.vc`, `inline.rs` dispatcher),
+and the `utilities.rs` follow-up (`send_poll` correct answers,
+telegraph media, `.getmsg` for `t.me/c/` links).
 Workspace `cargo check` is clean; `cargo test` passes for
 core/vc/web.
 
@@ -304,18 +306,24 @@ restarts). Bare `.help` is wired via `inline_query_click("ultd")`
 
 Known gaps (documented, not stubs — each site fails honestly
 naming the exact missing call; inventory in `RESPONDER_OPS.md`):
-1. `TODO(responder-op)` sites in plugins: 171 remain after the
-   wiring wave (~200 wired). Families: `payments.*` (Stars wallet /
+1. `TODO(responder-op)` sites in plugins: 167 remain after the
+   wiring wave (~200 wired) and the `utilities.rs` follow-up (4 more
+   wired: telegraph media, `.suggest`, `.quiz`, `.getmsg` `t.me/c/`
+   form; `.poll quiz_N` also marks its correct answer now, which
+   was a silent degradation rather than a TODO line). Families: `payments.*` (Stars wallet /
    top-up / revenue / refund / gifts / giveaways / gift codes),
    ephemeral/BusinessConnection + quick replies, forum topics,
    factcheck, block/unblock/report-spam, `UpdateEmojiStatus`,
    reactions, chat actions (`SetTyping`), effects list,
    create/delete chats + add/invite + export invite + edit group
    photo, media-by-reference sends (stored notes/snips/replies),
-   quiz polls (`correct_answers` — `send_poll` has no such slot),
    custom-emoji-set upload, geo/factcheck/reaction reads off
-   replied messages. A second trait round would need TL
-   verification per RPC; deliberately NOT done in this pass.
+   replied messages, thumbnail-size downloads, message-list
+   iteration, public-username chat resolution. A second trait round
+   would need TL verification per RPC; deliberately NOT done in
+   this pass. (Quiz polls left this list: `send_poll` now carries
+   `correct` indices + `solution`, and `.quiz`/`.suggest`/`.poll
+   quiz_N` are wired.)
    Layer-233 facts learned while writing the impl: `SetChatTheme`
    takes an emoticon-based `InputChatTheme`, not `InputTheme`;
    `messages::ChatFull` has a single `Full` variant; grammers'

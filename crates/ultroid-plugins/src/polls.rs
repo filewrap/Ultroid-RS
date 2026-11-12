@@ -6,10 +6,9 @@
 //! Nth option correct. All parsing and validation is real; the poll is
 //! sent with the `Responder` `send_poll` op.
 //!
-//! Note: `send_poll` takes no correct-answer index and no
-//! public/anonymous flag, so a `quiz_N` poll is sent as a quiz with the
-//! Nth option *not* marked correct server-side, and a `public` poll is
-//! sent the same way as an anonymous one.
+//! Note: `send_poll` takes no public/anonymous flag, so a `public`
+//! poll is sent the same way as an anonymous one; the `quiz_N`
+//! correct answer *is* marked server-side (`correct` indices).
 
 use crate::util::{def, reg_add};
 use ultroid_core::{ChatType, ClientKind, Ctx, Registry, Result};
@@ -80,10 +79,19 @@ async fn poll(ctx: &Ctx) -> Result<()> {
         ctx.reply("`Options Should be More than 1..`").await?;
         return Ok(());
     }
-    // NOTE: `send_poll` carries no correct-answer index and no
-    // public/anonymous flag (see the module docs), so `quiz_N` is sent
-    // as a plain quiz poll and `public` like an anonymous one.
-    let _ = correct;
+    if let Some(c) = correct {
+        if c >= options.len() {
+            ctx.reply(&format!(
+                "`Correct option must be between 1 and {} (got {}).`",
+                options.len(),
+                c + 1
+            ))
+            .await?;
+            return Ok(());
+        }
+    }
+    // `public` has no flag on `send_poll` (see the module docs), so it
+    // is sent like an anonymous poll; the quiz correct answer is marked.
     ctx.responder
         .send_poll(
             ctx.chat_id,
@@ -91,6 +99,8 @@ async fn poll(ctx: &Ctx) -> Result<()> {
             options,
             kind == PollKind::Multiple,
             kind == PollKind::Quiz,
+            correct.map(|c| vec![c]),
+            None,
         )
         .await?;
     Ok(())

@@ -136,13 +136,15 @@ All 102 plugins are wired into the registry (`ultroid-plugins`, see
 (`ultroid-core`, 47 methods + 4 group-call methods) covers the
 bulk of the Telegram operations; the wiring wave connected ~200
 plugin sites to it, and the voice commands reach the engine
-through the `Ctx.vc` actor handle. 171 sites remain as honest
+through the `Ctx.vc` actor handle. 167 sites remain as honest
 errors naming the exact missing call (`TODO(responder-op)`) —
 the documented gap families in `RESPONDER_OPS.md` (the
 `payments.*` Stars suite, BusinessConnection/quick replies,
 forum topics, factcheck, block/unblock, emoji status,
 reactions, chat actions, effects list, create/invite chats,
-media-by-reference sends, quiz polls, custom-emoji upload);
+media-by-reference sends, custom-emoji upload,
+thumbnail-size downloads, message-list iteration,
+public-username chat resolution);
 they are wired when a second trait round lands with TL-verified
 implementations for those RPCs. Nothing there claims to work
 when it does not.

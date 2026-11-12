@@ -598,6 +598,8 @@ impl Responder for GrammersResponder {
         options: Vec<String>,
         multiple: bool,
         quiz: bool,
+        correct: Option<Vec<usize>>,
+        solution: Option<String>,
     ) -> Result<i64> {
         let peer = resolve_ref(self.client(), dialog_id).await?;
         let answers: Vec<tl::enums::PollAnswer> = options
@@ -638,11 +640,21 @@ impl Responder for GrammersResponder {
             countries_iso2: None,
             hash: 0,
         });
+        // Correct answers are option *indices* (`Vector<int>` in
+        // the TL schema — unlike the answers' byte-string option ids
+        // above); out-of-range indices are dropped (callers validate,
+        // this is defence in depth).
+        let correct_answers: Option<Vec<i32>> = correct.map(|idxs| {
+            idxs.iter()
+                .filter(|&&i| i < options.len())
+                .map(|&i| i as i32)
+                .collect()
+        });
         let media = tl::enums::InputMedia::Poll(Box::new(tl::types::InputMediaPoll {
             poll,
-            correct_answers: None,
+            correct_answers,
             attached_media: None,
-            solution: None,
+            solution,
             solution_entities: None,
             solution_media: None,
         }));

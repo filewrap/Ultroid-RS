@@ -75,7 +75,7 @@ async fn send_file_to(&self, dialog_id: i64, path: &Path, caption: &str) -> Resu
 async fn send_markup_to(&self, dialog_id: i64, text: &str, buttons: Vec<Vec<InlineButton>>) -> Result<i64>;
 //   InlineButton from ultroid_core::tg: InlineButton::data(text, bytes) /
 //   ::url(text, url) — build rows with Vec<Vec<InlineButton>>.
-async fn send_poll(&self, dialog_id: i64, question: &str, options: Vec<String>, multiple: bool, quiz: bool) -> Result<i64>;
+async fn send_poll(&self, dialog_id: i64, question: &str, options: Vec<String>, multiple: bool, quiz: bool, correct: Option<Vec<usize>>, solution: Option<String>) -> Result<i64>;  // `correct` = 0-based correct-option indices (quiz only)
 async fn send_scheduled(&self, dialog_id: i64, text: &str, delay_secs: u64) -> Result<i64>;
 async fn send_effect(&self, dialog_id: i64, text: &str, effect_id: i64) -> Result<i64>;
 async fn send_geo_live(&self, dialog_id: i64, latitude: f64, longitude: f64, period_secs: i32) -> Result<i64>;
@@ -213,17 +213,24 @@ use the `Responder` methods above, not the actor.
 
 ## Known NOT-covered ops (leave the TODO, do not work around)
 
-171 sites remain (after the wiring wave wired ~200). The VC engine
-and group-call plumbing are now COVERED (`Ctx.vc` actor +
-`create/discard_group_call`, `edit_group_call_title`,
-`invite_to_group_call`; `vcmusic.rs` fully wired), as is the
-replied message's sender (`ctx.reply_to_sender_id`).
+167 sites remain (after the wiring wave wired ~200, plus a
+follow-up that wired the 4 `utilities.rs` leftovers: telegraph
+media upload, `.suggest`/`.quiz` polls — `send_poll` now carries
+`correct` indices + `solution` — and `.getmsg` for `t.me/c/`
+links; `.poll quiz_N` also marks its correct answer now). The VC engine and group-call plumbing are now COVERED
+(`Ctx.vc` actor + `create/discard_group_call`,
+`edit_group_call_title`, `invite_to_group_call`; `vcmusic.rs`
+fully wired), as is the replied message's sender
+(`ctx.reply_to_sender_id`).
 - Payments/Stars: `payments.*` (gifts, giveaways, stars wallet/top-up/
   revenue/refund, gift codes, premium gift options).
 - Quick replies (`messages.GetQuickReplies*`).
 - Ephemeral / business-connection RPCs (`ephemeral.*`, `InvokeWithBusinessConnection`).
 - Forum topics (`GetForumTopics`/`CreateForumTopic`/`EditForumTopic`).
 - FactCheck RPCs (`messages.GetFactCheck`/`EditFactCheck`/`DeleteFactCheck`).
+- Thumbnail-size downloads (`download_media(thumb=-1)`), message-list
+  iteration (`iter_messages`), public-username chat resolution
+  (channels — `resolve_user` is users-only).
 - Block/unblock/report-spam (`contacts.Block/Unblock`, `GetBlocked`,
   `messages.ReportSpam`).
 - Create/delete chats, add/invite users, export invite, edit group photo,

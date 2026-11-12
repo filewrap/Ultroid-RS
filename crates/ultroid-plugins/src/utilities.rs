@@ -5,15 +5,20 @@
 //! `.telegraph` text pages (telegra.ph account/page HTTP),
 //! `.ipinfo` (ipinfo.io HTTP), `.json` (a JSON view of the command
 //! context), `.cpy`/`.pst` (text clipboard), `.suggest`/`.quiz`
-//! (poll argument parsing/validation), `.rmbg` for a local file path
-//! (remove.bg multipart HTTP), `get_video_duration` / `get_thumbnail`
-//! (`ffprobe`/`ffmpeg` subprocesses).
+//! (polls sent via the `Responder`, incl. quiz correct answers),
+//! `.telegraph` media upload (download + telegra.ph/upload + img
+//! page), `.getmsg` for `t.me/c/` links (fetch + re-send text/media),
+//! `.rmbg` for a local file path (remove.bg multipart HTTP),
+//! `get_video_duration` / `get_thumbnail` (`ffprobe`/`ffmpeg`
+//! subprocesses).
 //!
 //! Telegram operations with no `Responder` equivalent — leaving a
 //! channel, dialogs/stats iteration, entity/full-user fetches, invites,
-//! media downloads, poll sends, fetching arbitrary messages — return
-//! the honest `TODO(responder-op)` error at their call sites.
+//! thumbnail-size downloads, message-list iteration, public-username
+//! chat resolution — return the honest `TODO(responder-op)` error at
+//! their call sites.
 
+use std::path::Path;
 use std::sync::{Mutex, OnceLock};
 
 use chrono::{Datelike, Local, NaiveDate, Utc};
@@ -232,6 +237,12 @@ async fn telegraph_token(ctx: &Ctx) -> Result<String> {
 }
 
 async fn telegraph_create_page(ctx: &Ctx, title: &str, content: &str) -> Result<String> {
+    telegraph_create_page_nodes(ctx, title, json!([{ "tag": "p", "children": [content] }])).await
+}
+
+/// Create a Telegraph page from an arbitrary Telegraph content tree
+/// (e.g. an `img` node for an uploaded file).
+async fn telegraph_create_page_nodes(ctx: &Ctx, title: &str, content: Value) -> Result<String> {
     let token = telegraph_token(ctx).await?;
     let domain = db_get(ctx, "GRAPH_DOMAIN")
         .await
@@ -244,7 +255,7 @@ async fn telegraph_create_page(ctx: &Ctx, title: &str, content: &str) -> Result<
         .json(&json!({
             "access_token": token,
             "title": title,
-            "content": [{ "tag": "p", "children": [content] }],
+            "content": content,
         }))
         .send()
         .await
@@ -804,6 +815,40 @@ async fn normalise_image_path(path: &std::path::Path) -> String {
     path.to_string_lossy().into_owned()
 }
 
+/// Extension for the file types telegra.ph/upload accepts, sniffed
+/// from magic bytes (the trait gives no filename or media kind).
+fn sniff_telegraph_ext(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(b"\x89PNG") {
+        Some("png")
+    } else if bytes.starts_with(b"\xFF\xD8\xFF") {
+        Some("jpg")
+    } else if bytes.starts_with(b"GIF8") {
+        Some("gif")
+    } else if bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        Some("webp")
+    } else if bytes.len() >= 8 && &bytes[4..8] == b"ftyp" {
+        Some("mp4")
+    } else {
+        None
+    }
+}
+
+/// Upload the file at `path` to telegra.ph and create an image page
+/// for it (the `telegraph` package's `upload_file` flow).
+async fn upload_telegraph_media(ctx: &Ctx, title: &str, path: &Path) -> Result<String> {
+    let bytes = tokio::fs::read(path).await.map_err(Error::Io)?;
+    let ext = sniff_telegraph_ext(&bytes).ok_or_else(|| {
+        Error::Other("Telegraph only accepts images (jpg/png/gif/webp) and mp4 video.".to_string())
+    })?;
+    let url = crate::converter::telegraph_upload(ctx, &bytes, &format!("file.{ext}")).await?;
+    telegraph_create_page_nodes(
+        ctx,
+        title,
+        json!([{ "tag": "img", "attrs": { "src": url } }]),
+    )
+    .await
+}
+
 async fn cmd_telegraph(ctx: &Ctx) -> Result<()> {
     let status = ctx.reply(&ctx.get_str("com_1")).await?;
     let title = if ctx.args.trim().is_empty() {
@@ -811,29 +856,65 @@ async fn cmd_telegraph(ctx: &Ctx) -> Result<()> {
     } else {
         ctx.args.trim().to_string()
     };
-    let Some(reply_text) = ctx.reply_to_text.clone() else {
+    let Some(reply_id) = ctx.reply_to_id else {
         ctx.edit(status, "`Reply to Message.`").await?;
         return Ok(());
     };
-    // Media replies need a download; a plain-text reply is pasted as-is.
-    // (Python distinguishes reply.media; here reply_to_text is only set
-    // for text replies, so a media reply also lands here with no text —
-    // distinguish by checking whether the text is empty.)
-    if reply_text.trim().is_empty() {
-        // TODO(responder-op): download replied media for Telegraph upload
-        // (Python: plugins/utilities.py telegraphcmd via reply.download_media()).
-        return Err(Error::Other(
-            "uploading replied media to Telegraph requires a binary Responder op (Python: plugins/utilities.py telegraphcmd via reply.download_media())".to_string(),
-        ));
+    // A media reply uploads the file (even when captioned — Python
+    // uploads the media); a text reply pastes its text.
+    let has_media = ctx
+        .responder
+        .message_summary(ctx.chat_id, reply_id as i32)
+        .await
+        .ok()
+        .flatten()
+        .map(|m| m.has_media)
+        .unwrap_or(false);
+    let reply_text = ctx.reply_to_text.clone().unwrap_or_default();
+    if !has_media && !reply_text.trim().is_empty() {
+        match telegraph_create_page(ctx, &title, reply_text.trim()).await {
+            Ok(url) => {
+                ctx.edit(status, &format!("Pasted to Telegraph : [Telegraph]({url})"))
+                    .await?;
+            }
+            Err(e) => {
+                ctx.edit(status, &format!("`Failed to create Telegraph page: {e}`"))
+                    .await?;
+            }
+        }
+        return Ok(());
     }
-    match telegraph_create_page(ctx, &title, reply_text.trim()).await {
+    // Media path (Python: plugins/utilities.py telegraphcmd via
+    // reply.download_media() + telegraph.upload_file).
+    let dest = std::env::temp_dir().join(format!(
+        "ultroid-telegraph-{}",
+        uuid::Uuid::new_v4().as_simple()
+    ));
+    let downloaded = ctx
+        .responder
+        .download_media(ctx.chat_id, reply_id as i32, &dest)
+        .await;
+    let path = match downloaded {
+        Ok(p) => p,
+        Err(e) => {
+            ctx.edit(status, &format!("`Failed to download media: {e}`"))
+                .await?;
+            return Ok(());
+        }
+    };
+    let result = upload_telegraph_media(ctx, &title, &path).await;
+    let _ = tokio::fs::remove_file(&path).await;
+    match result {
         Ok(url) => {
             ctx.edit(status, &format!("Pasted to Telegraph : [Telegraph]({url})"))
                 .await?;
         }
         Err(e) => {
-            ctx.edit(status, &format!("`Failed to create Telegraph page: {e}`"))
-                .await?;
+            ctx.edit(
+                status,
+                &format!("`Failed to upload media to Telegraph: {e}`"),
+            )
+            .await?;
         }
     }
     Ok(())
@@ -911,12 +992,20 @@ async fn cmd_suggest(ctx: &Ctx) -> Result<()> {
             .await?;
         return Ok(());
     };
-    // TODO(responder-op): send InputMediaPoll (Yes/No)
-    // (Python: plugins/utilities.py sugg via send_file(file=InputMediaPoll)).
-    let _ = text;
-    Err(Error::Other(
-        "sending a suggestion poll requires a binary Responder op (Python: plugins/utilities.py sugg via InputMediaPoll)".to_string(),
-    ))
+    // Yes/No poll (Python: plugins/utilities.py sugg via
+    // send_file(file=InputMediaPoll)).
+    ctx.responder
+        .send_poll(
+            ctx.chat_id,
+            &text,
+            vec!["Yes".to_string(), "No".to_string()],
+            false,
+            false,
+            None,
+            None,
+        )
+        .await?;
+    Ok(())
 }
 
 async fn cmd_quiz(ctx: &Ctx) -> Result<()> {
@@ -927,12 +1016,21 @@ async fn cmd_quiz(ctx: &Ctx) -> Result<()> {
             return Ok(());
         }
     };
-    // TODO(responder-op): send InputMediaPoll (quiz)
-    // (Python: plugins/utilities.py quiz_poll via send_file(file=InputMediaPoll(quiz=True))).
-    let _ = parsed;
-    Err(Error::Other(
-        "sending a quiz poll requires a binary Responder op (Python: plugins/utilities.py quiz_poll via InputMediaPoll)".to_string(),
-    ))
+    // Quiz poll: `parse_quiz` validated `answer` to 1..=len, so
+    // `answer - 1` is a valid 0-based correct index (Python:
+    // plugins/utilities.py quiz_poll via InputMediaPoll(quiz=True)).
+    ctx.responder
+        .send_poll(
+            ctx.chat_id,
+            &parsed.question,
+            parsed.options,
+            false,
+            true,
+            Some(vec![parsed.answer - 1]),
+            parsed.solution,
+        )
+        .await?;
+    Ok(())
 }
 
 async fn cmd_ipinfo(ctx: &Ctx) -> Result<()> {
@@ -1026,7 +1124,7 @@ async fn cmd_getmsg(ctx: &Ctx) -> Result<()> {
         ctx.reply("`Please provide a link!`").await?;
         return Ok(());
     }
-    let _status = ctx.reply("`Loading...`").await?;
+    let status = ctx.reply("`Loading...`").await?;
     let (chat, msg) = get_chat_and_msgid(arg);
     if chat.is_none() || msg.is_none() {
         ctx.reply(
@@ -1035,12 +1133,57 @@ async fn cmd_getmsg(ctx: &Ctx) -> Result<()> {
         .await?;
         return Ok(());
     }
-    // TODO(responder-op): fetch the message + download/re-upload its media
-    // (Python: plugins/utilities.py get_restricted_msg via get_messages +
-    // fast_downloader/fast_uploader).
-    Err(Error::Other(
-        "fetching a message from another chat requires a binary Responder op (Python: plugins/utilities.py get_restricted_msg via client.get_messages)".to_string(),
-    ))
+    let msg_id = msg.unwrap() as i32;
+    // `t.me/c/<id>/<msg>` links carry a numeric chat id. A public
+    // `@username` link needs channel resolution, which no Responder op
+    // provides (Python: get_messages via client.get_entity).
+    let Some(chat_id) = chat.and_then(|c| c.parse::<i64>().ok()) else {
+        ctx.edit(
+            status,
+            "`Fetching from a public @username link needs channel resolution, which is not available.`",
+        )
+        .await?;
+        return Ok(());
+    };
+    // Fetch the message, then re-send it here (text and/or media) —
+    // the point of the command is that the source forbids forwarding
+    // (Python: plugins/utilities.py get_restricted_msg via
+    // get_messages + fast_downloader/fast_uploader).
+    let summary = ctx.responder.message_summary(chat_id, msg_id).await?;
+    let Some(summary) = summary else {
+        ctx.edit(status, "`Message not found (deleted or not accessible).`")
+            .await?;
+        return Ok(());
+    };
+    if summary.has_media {
+        let dest = std::env::temp_dir().join(format!(
+            "ultroid-getmsg-{}",
+            uuid::Uuid::new_v4().as_simple()
+        ));
+        match ctx.responder.download_media(chat_id, msg_id, &dest).await {
+            Ok(path) => {
+                let r = ctx
+                    .responder
+                    .send_file_to(ctx.chat_id, &path, &summary.text)
+                    .await;
+                let _ = tokio::fs::remove_file(&path).await;
+                r?;
+            }
+            Err(e) => {
+                ctx.edit(status, &format!("`Failed to download media: {e}`"))
+                    .await?;
+                return Ok(());
+            }
+        }
+    } else if !summary.text.is_empty() {
+        ctx.reply(&summary.text).await?;
+    } else {
+        ctx.edit(status, "`That message has no text or downloadable media.`")
+            .await?;
+        return Ok(());
+    }
+    let _ = ctx.delete(status).await;
+    Ok(())
 }
 
 async fn cmd_lastpm(ctx: &Ctx) -> Result<()> {

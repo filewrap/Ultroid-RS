@@ -99,6 +99,9 @@ pub trait Responder: Send + Sync {
         buttons: Vec<Vec<InlineButton>>,
     ) -> Result<i64>;
     /// Send a poll (`InputMediaPoll`). Returns the new message id.
+    /// `correct` is the 0-based indices of the correct options (quiz
+    /// polls only — a quiz poll with no correct answer is rejected by
+    /// the server); `solution` is the quiz explanation text.
     async fn send_poll(
         &self,
         dialog_id: i64,
@@ -106,6 +109,8 @@ pub trait Responder: Send + Sync {
         options: Vec<String>,
         multiple: bool,
         quiz: bool,
+        correct: Option<Vec<usize>>,
+        solution: Option<String>,
     ) -> Result<i64>;
     /// Send a plain-text message scheduled `delay_secs` in the future.
     async fn send_scheduled(&self, dialog_id: i64, text: &str, delay_secs: u64) -> Result<i64>;

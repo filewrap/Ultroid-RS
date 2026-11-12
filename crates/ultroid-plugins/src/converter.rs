@@ -189,7 +189,7 @@ async fn cleanup(paths: &[&Path]) {
 /// Upload bytes to telegra.ph (`POST /upload`, multipart form, field
 /// `file`). The reqwest build has no `multipart` feature, so the body is
 /// assembled by hand. Returns the `https://telegra.ph/...` URL.
-async fn telegraph_upload(ctx: &Ctx, bytes: &[u8], filename: &str) -> Result<String> {
+pub(crate) async fn telegraph_upload(ctx: &Ctx, bytes: &[u8], filename: &str) -> Result<String> {
     let boundary = format!("----ultroid{}", uuid::Uuid::new_v4().simple());
     let mut body = Vec::new();
     body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
