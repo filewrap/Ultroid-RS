@@ -9,6 +9,9 @@ use std::time::Duration;
 use tokio::time::sleep;
 use ultroid_core::error::Result;
 
+/// The downloads directory (mirrors `_tools.py` `DOWNLOADS_DIR = "./temp"`).
+pub const DOWNLOADS_DIR: &str = "./temp";
+
 /// Seconds → `M:SS` or `H:MM:SS`; 0 → `LIVE` (mirrors `_messages.fmt_duration`).
 pub fn sec_to_min(seconds: u64) -> String {
     if seconds == 0 {
@@ -25,11 +28,7 @@ pub fn sec_to_min(seconds: u64) -> String {
 }
 
 pub fn ms_to_seconds(ms: u64) -> u64 {
-    if ms <= 1000 {
-        ms
-    } else {
-        ms / 1000
-    }
+    if ms <= 1000 { ms } else { ms / 1000 }
 }
 
 /// Remove files older than `max_age_secs` from a directory, mirroring

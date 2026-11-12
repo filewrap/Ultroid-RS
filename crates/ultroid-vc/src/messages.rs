@@ -76,7 +76,12 @@ pub fn queue_list_msg(tracks: &[(String, u64)]) -> String {
     }
     let mut out = String::from("📋 **Queue**\n");
     for (i, (title, dur)) in tracks.iter().enumerate() {
-        out.push_str(&format!("\n{}. {} \\| {}", i + 1, esc(title), fmt_duration(*dur)));
+        out.push_str(&format!(
+            "\n{}. {} \\| {}",
+            i + 1,
+            esc(title),
+            fmt_duration(*dur)
+        ));
     }
     out
 }

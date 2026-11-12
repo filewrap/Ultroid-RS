@@ -234,8 +234,5 @@ pub async fn probe_media(path: &Path) -> Result<ProbeResult> {
 /// Duration of a local file in seconds (ffprobe), mirroring
 /// `vc/_tools.py:get_audio_duration`.
 pub async fn get_audio_duration(path: &Path) -> Result<f64> {
-    Ok(probe_media(path)
-        .await?
-        .duration_secs
-        .unwrap_or(0.0))
+    Ok(probe_media(path).await?.duration_secs.unwrap_or(0.0))
 }

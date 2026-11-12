@@ -105,6 +105,20 @@ impl Bridge {
         &self.client
     }
 
+    /// Reverse-lookup the chat a group call belongs to, by its call id.
+    ///
+    /// Raw `Update::GroupCallParticipants` / `Update::GroupCallChainBlocks`
+    /// carry only the `InputGroupCall`, no peer — the binary's update loop
+    /// uses this to recover the chat id for `handle_raw_update`.
+    pub async fn chat_id_for_call(&self, call_id: i64) -> Option<i64> {
+        self.calls
+            .lock()
+            .await
+            .iter()
+            .find(|(_, cached)| cached.input.id == call_id)
+            .map(|(chat_id, _)| *chat_id)
+    }
+
     pub fn subscribe(&self) -> broadcast::Receiver<BridgeEvent> {
         self.events.subscribe()
     }
@@ -127,15 +141,17 @@ impl Bridge {
             Ok(v) => Ok(v),
             Err(err) => {
                 let migrate_dc = match &err {
-                    InvocationError::Rpc(RpcError { code: 303, value: Some(dc), .. }) => {
-                        Some(*dc as i32)
-                    }
-                    InvocationError::Rpc(RpcError { code: 303, name, .. }) => {
+                    InvocationError::Rpc(RpcError {
+                        code: 303,
+                        value: Some(dc),
+                        ..
+                    }) => Some(*dc as i32),
+                    InvocationError::Rpc(RpcError {
+                        code: 303, name, ..
+                    }) => {
                         // grammers strips the trailing _N into `value`, but
                         // parse the name too, defensively.
-                        name.rsplit('_')
-                            .next()
-                            .and_then(|s| s.parse::<i32>().ok())
+                        name.rsplit('_').next().and_then(|s| s.parse::<i32>().ok())
                     }
                     _ => None,
                 };
@@ -241,16 +257,14 @@ impl Bridge {
                     .map_err(|e| Error::Telegram(format!("GetFullChat: {e}")))?;
                 let tl::enums::messages::ChatFull::Full(r) = res;
                 match r.full_chat {
-                    tl::enums::ChatFull::Full(full) => {
-                        (full.call, full.groupcall_default_join_as)
-                    }
+                    tl::enums::ChatFull::Full(full) => (full.call, full.groupcall_default_join_as),
                     _ => (None, None),
                 }
             }
             _ => {
                 return Err(Error::Other(format!(
                     "chat {chat_id} is not a group/channel"
-                )))
+                )));
             }
         };
         let Some(input) = call else {
@@ -320,8 +334,18 @@ impl Bridge {
         public_key: Option<[u8; 32]>,
         block: Option<Vec<u8>>,
     ) -> Result<String> {
-        self.join_group_call_inner(chat_id, payload, video_stopped, join_as, invite_hash, peer_ref, public_key, block, false)
-            .await
+        self.join_group_call_inner(
+            chat_id,
+            payload,
+            video_stopped,
+            join_as,
+            invite_hash,
+            peer_ref,
+            public_key,
+            block,
+            false,
+        )
+        .await
     }
 
     async fn join_group_call_inner(
@@ -470,10 +494,7 @@ impl Bridge {
         Ok(())
     }
 
-    pub async fn get_group_participants(
-        &self,
-        chat_id: i64,
-    ) -> Result<Vec<CallParticipant>> {
+    pub async fn get_group_participants(&self, chat_id: i64) -> Result<Vec<CallParticipant>> {
         let Some(cached) = self.get_input_call(chat_id, None).await? else {
             return Ok(Vec::new());
         };
@@ -650,7 +671,9 @@ impl Bridge {
             .map_err(|e| Error::Telegram(format!("GetDhConfig: {e}")))?;
         match res {
             tl::enums::messages::DhConfig::Config(d) => Ok(d),
-            _ => Err(Error::Telegram("GetDhConfig returned an unexpected type".into())),
+            _ => Err(Error::Telegram(
+                "GetDhConfig returned an unexpected type".into(),
+            )),
         }
     }
 
@@ -776,7 +799,10 @@ impl Bridge {
                         parts.push(cp);
                     }
                 }
-                self.participants.lock().await.insert(chat_id, parts.clone());
+                self.participants
+                    .lock()
+                    .await
+                    .insert(chat_id, parts.clone());
                 let _ = self.events.send(BridgeEvent::ParticipantsChanged {
                     chat_id,
                     participants: parts,

@@ -30,20 +30,36 @@ impl FailureKind {
 }
 
 const TLS_MARKERS: &[&str] = &[
-    "tls", "ssl", "certificate", "handshake", "unknownissuer", "unknown issuer",
+    "tls",
+    "ssl",
+    "certificate",
+    "handshake",
+    "unknownissuer",
+    "unknown issuer",
 ];
-const RATE_MARKERS: &[&str] = &[
-    "429", "rate limit", "too many requests", "slow down",
-];
+const RATE_MARKERS: &[&str] = &["429", "rate limit", "too many requests", "slow down"];
 const GEO_MARKERS: &[&str] = &[
-    "geo", "not available in your country", "blocked in your country", "region",
+    "geo",
+    "not available in your country",
+    "blocked in your country",
+    "region",
 ];
 const UNAVAILABLE_MARKERS: &[&str] = &[
-    "404", "not found", "unavailable", "removed", "private video", "deleted",
+    "404",
+    "not found",
+    "unavailable",
+    "removed",
+    "private video",
+    "deleted",
 ];
 const NO_FORMAT_MARKERS: &[&str] = &["no format", "no suitable", "no video formats"];
 const NETWORK_MARKERS: &[&str] = &[
-    "connection", "timeout", "timed out", "dns", "unreachable", "reset",
+    "connection",
+    "timeout",
+    "timed out",
+    "dns",
+    "unreachable",
+    "reset",
 ];
 
 fn hit(markers: &[&str], hay: &str) -> bool {
@@ -105,5 +121,9 @@ pub fn diagnose(errors: &[&str], url: &str) -> (String, String, FailureKind) {
 
 /// Summarise a list of attempt errors into one line.
 pub fn summarise_attempts(errors: &[&str]) -> String {
-    errors.iter().map(|e| trim(e)).collect::<Vec<_>>().join("; ")
+    errors
+        .iter()
+        .map(|e| trim(e))
+        .collect::<Vec<_>>()
+        .join("; ")
 }

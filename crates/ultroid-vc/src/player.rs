@@ -153,7 +153,9 @@ impl PlayerRegistry {
     }
 
     pub fn player(&mut self, chat_id: i64) -> &mut PlayerState {
-        self.players.entry(chat_id).or_insert_with(|| PlayerState::new(chat_id))
+        self.players
+            .entry(chat_id)
+            .or_insert_with(|| PlayerState::new(chat_id))
     }
 
     pub fn get(&self, chat_id: i64) -> Option<&PlayerState> {

@@ -40,6 +40,14 @@ impl CachedTrack {
 }
 
 /// Lightweight track info (search results / resolver output).
+///
+/// Field names follow the Rust port; the Python `_dataclass.py`
+/// `TrackInfo` names are noted where they differ: `id` is Python's
+/// `tc`, `title` is Python's `name`, `thumbnail` is Python's `cover`,
+/// `duration_secs` is Python's `duration`. The remaining Python
+/// fields (`cdnurl`, `key`, `album`, `lyrics`, `year`) are carried
+/// verbatim because the downloaders need them (CDN URL for API
+/// tracks, decryption key for Spotify, album/year for metadata).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TrackInfo {
     pub id: String,
@@ -50,6 +58,18 @@ pub struct TrackInfo {
     pub thumbnail: Option<String>,
     pub platform: String,
     pub is_video: bool,
+    /// Direct download (CDN) URL; empty when downloads go via yt-dlp.
+    #[serde(default)]
+    pub cdnurl: String,
+    /// Decryption key (hex) for encrypted Spotify audio; empty otherwise.
+    #[serde(default)]
+    pub key: String,
+    #[serde(default)]
+    pub album: String,
+    #[serde(default)]
+    pub lyrics: String,
+    #[serde(default)]
+    pub year: i64,
 }
 
 /// A resolved, playable music track (with its stream URL).

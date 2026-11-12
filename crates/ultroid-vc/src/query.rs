@@ -16,8 +16,10 @@ pub enum QueryKind {
 fn youtube_url_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
-        Regex::new(r"(?i)(?:youtube\.com/(?:watch\?v=|shorts/|embed/|v/)|youtu\.be/)([A-Za-z0-9_-]{11})")
-            .expect("static YouTube regex")
+        Regex::new(
+            r"(?i)(?:youtube\.com/(?:watch\?v=|shorts/|embed/|v/)|youtu\.be/)([A-Za-z0-9_-]{11})",
+        )
+        .expect("static YouTube regex")
     })
 }
 

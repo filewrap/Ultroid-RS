@@ -24,16 +24,15 @@
 
 use crate::bridge::{Bridge, BridgeEvent, CallParticipant};
 use crate::cacher::ChatCacher;
-use crate::dataclass::CachedTrack;
 use crate::database::VcDatabase;
+use crate::dataclass::CachedTrack;
 use crate::media::{AudioQuality, MediaStream};
 use crate::player::PlayerRegistry;
 use crate::tools::ms_to_seconds;
 use grammers_client::session::types::PeerRef;
 use grammers_client::tl;
 use ntgcalls::{
-    AuthParams, ConnectionMode, ConnectionState, DhConfig, MediaDescription, NTgCalls,
-    StreamMode,
+    AuthParams, ConnectionMode, ConnectionState, DhConfig, MediaDescription, NTgCalls, StreamMode,
 };
 use sha1::{Digest, Sha1};
 use std::collections::HashMap;
@@ -44,8 +43,13 @@ use ultroid_core::error::{Error, Result};
 /// Events arriving from ntgcalls callbacks.
 #[derive(Debug)]
 enum EngineEvent {
-    StreamEnded { chat_id: i64 },
-    ConnectionChanged { chat_id: i64, state: ConnectionState },
+    StreamEnded {
+        chat_id: i64,
+    },
+    ConnectionChanged {
+        chat_id: i64,
+        state: ConnectionState,
+    },
 }
 
 /// Per-chat call statistics.
@@ -160,8 +164,10 @@ impl Engine {
                             .await
                             .map_err(|e| Error::Other(format!("ntgcalls connect: {e}")))?;
                     }
-                } else if matches!(state, ConnectionState::Failed | ConnectionState::Timeout | ConnectionState::Closed)
-                {
+                } else if matches!(
+                    state,
+                    ConnectionState::Failed | ConnectionState::Timeout | ConnectionState::Closed
+                ) {
                     self.pending.lock().await.remove(&chat_id);
                     self.players.lock().await.player(chat_id).stop();
                 }
@@ -240,7 +246,16 @@ impl Engine {
             .map_err(|e| Error::Other(format!("ntgcalls set_stream_sources: {e}")))?;
         let transport = self
             .bridge
-            .join_group_call(chat_id, &offer, video_stopped, None, None, peer_ref, None, None)
+            .join_group_call(
+                chat_id,
+                &offer,
+                video_stopped,
+                None,
+                None,
+                peer_ref,
+                None,
+                None,
+            )
             .await?;
         match self
             .calls
@@ -262,22 +277,36 @@ impl Engine {
     }
 
     /// Play the next queued track in a chat (mirrors `play_next`).
+    /// Download failures skip to the next track (loop, not
+    /// recursion — async recursion needs boxing).
     pub async fn play_next(&self, chat_id: i64) -> Result<()> {
-        let next = {
-            let mut players = self.players.lock().await;
-            players.player(chat_id).start_next()
-        };
-        let Some(track) = next else {
-            // Queue exhausted — leave the call (mirrors Python: end when
-            // the queue empties and looping is off).
-            return self.end(chat_id).await;
-        };
-        let input = track
-            .file_path
-            .clone()
-            .unwrap_or_else(|| track.url.clone());
-        let stream = MediaStream::audio(input, AudioQuality::High);
-        self.play_media(chat_id, stream, None).await
+        loop {
+            let next = {
+                let mut players = self.players.lock().await;
+                players.player(chat_id).start_next()
+            };
+            let Some(track) = next else {
+                // Queue exhausted — leave the call (mirrors Python:
+                // end when the queue empties and looping is off).
+                return self.end(chat_id).await;
+            };
+            // `_play_song`: use the cached file, else download it via
+            // the platform service (`Call.song_download`); a failed
+            // download skips to the next track instead of playing a
+            // bare URL.
+            let input = match &track.file_path {
+                Some(p) if !p.is_empty() => Some(p.clone()),
+                _ => crate::downloader::song_download(&track)
+                    .await
+                    .map(|p| p.to_string_lossy().into_owned()),
+            };
+            let Some(input) = input else {
+                tracing::warn!("vc: failed to download track {}, skipping", track.track_id);
+                continue;
+            };
+            let stream = MediaStream::audio(input, AudioQuality::High);
+            return self.play_media(chat_id, stream, None).await;
+        }
     }
 
     /// Enqueue a track; if nothing is playing, start it immediately.
@@ -443,10 +472,7 @@ impl Engine {
             let digest = h.finalize();
             digest[digest.len() - 8..].to_vec()
         };
-        let call = self
-            .bridge
-            .request_call(user_peer, g_a_hash, video)
-            .await?;
+        let call = self.bridge.request_call(user_peer, g_a_hash, video).await?;
         Ok(P2pOffer { g_a, call })
     }
 

@@ -25,7 +25,10 @@ fn video_quality_params_match_pytgcalls() {
 #[test]
 fn query_classification_matches_python() {
     assert_eq!(classify("dQw4w9WgXcQ"), QueryKind::VideoId);
-    assert_eq!(classify("https://www.youtube.com/watch?v=dQw4w9WgXcQ"), QueryKind::Url);
+    assert_eq!(
+        classify("https://www.youtube.com/watch?v=dQw4w9WgXcQ"),
+        QueryKind::Url
+    );
     assert_eq!(classify("https://youtu.be/dQw4w9WgXcQ"), QueryKind::Url);
     assert_eq!(classify("https://example.com/song.mp3"), QueryKind::Url);
     assert_eq!(classify("never gonna give you up"), QueryKind::Search);

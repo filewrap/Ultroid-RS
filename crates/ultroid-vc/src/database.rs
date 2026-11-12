@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use ultroid_core::db::{db_get_json, db_set_json, Database};
+use ultroid_core::db::{Database, db_get_json, db_set_json};
 
 /// Per-chat assistant assignment + channel binding.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -44,10 +44,7 @@ impl VcDatabase {
 
     async fn store(&self, chat_id: i64, settings: &VcChatSettings) {
         let _ = db_set_json(&*self.db, &format!("vc:assistant:{chat_id}"), settings).await;
-        self.cache
-            .lock()
-            .await
-            .insert(chat_id, settings.clone());
+        self.cache.lock().await.insert(chat_id, settings.clone());
     }
 
     pub async fn get_assistant(&self, chat_id: i64) -> Option<i64> {
