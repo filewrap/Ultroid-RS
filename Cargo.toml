@@ -5,12 +5,12 @@ members = [
     "crates/ultroid-vc",
     "crates/ultroid-agent",
     "crates/ultroid-assistant",
+    "crates/ultroid-plugins",
     "crates/ultroid-web",
 ]
-# NOTE (build order, user rule "new functions first"): `ultroid-rs` (binary),
-# `ultroid-plugins`, `ultroid-assistant`, `ultroid-agent` and `ultroid-web`
-# re-join `members` once their real code lands; they are not listed with
-# placeholder targets — no stubs, ever.
+# NOTE (build order, user rule "new functions first"): `ultroid-rs` (binary)
+# re-joins `members` once its real code lands; it is not listed with a
+# placeholder target — no stubs, ever.
 resolver = "2"
 
 [workspace.package]

@@ -4167,6 +4167,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "ultroid-plugins"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "base64 0.22.1",
+ "chrono",
+ "futures",
+ "image",
+ "qrcode",
+ "rand 0.8.8",
+ "regex",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "ultroid-agent",
+ "ultroid-core",
+ "ultroid-rich",
+ "ultroid-vc",
+ "url",
+ "uuid",
+]
+
+[[package]]
 name = "ultroid-rich"
 version = "0.1.0"
 dependencies = [
@@ -4176,6 +4202,31 @@ dependencies = [
  "rand 0.8.8",
  "tokio",
  "ultroid-core",
+]
+
+[[package]]
+name = "ultroid-rs"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "grammers-client",
+ "grammers-mtsender",
+ "grammers-session",
+ "grammers-tl-types",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "ultroid-agent",
+ "ultroid-assistant",
+ "ultroid-core",
+ "ultroid-plugins",
+ "ultroid-rich",
+ "ultroid-vc",
+ "ultroid-web",
 ]
 
 [[package]]
