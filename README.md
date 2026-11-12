@@ -132,12 +132,20 @@ invented.
 ## Plugin status
 
 All 102 plugins are wired into the registry (`ultroid-plugins`, see
-`DESIGN.md` for the per-plugin table). A small number of plugin
-operations need raw MTProto calls that the `Responder` surface does
-not yet expose (admin actions, fetching arbitrary messages/media,
-chat info); those sites return an honest error naming the missing
-operation (`TODO(responder-op)`) and are listed in `DESIGN.md` —
-they are wired when the `Responder` trait gains those operations.
+`DESIGN.md` for the per-plugin table). The `Responder` trait
+(`ultroid-core`, 47 methods + 4 group-call methods) covers the
+bulk of the Telegram operations; the wiring wave connected ~200
+plugin sites to it, and the voice commands reach the engine
+through the `Ctx.vc` actor handle. 171 sites remain as honest
+errors naming the exact missing call (`TODO(responder-op)`) —
+the documented gap families in `RESPONDER_OPS.md` (the
+`payments.*` Stars suite, BusinessConnection/quick replies,
+forum topics, factcheck, block/unblock, emoji status,
+reactions, chat actions, effects list, create/invite chats,
+media-by-reference sends, quiz polls, custom-emoji upload);
+they are wired when a second trait round lands with TL-verified
+implementations for those RPCs. Nothing there claims to work
+when it does not.
 
 ## Environment variables
 

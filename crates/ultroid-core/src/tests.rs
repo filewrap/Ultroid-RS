@@ -33,6 +33,14 @@ impl Responder for NullResponder {
     async fn edit_html(&self, _m: i64, _h: &str) -> Result<()> {
         Ok(())
     }
+    async fn edit_markup(
+        &self,
+        _m: i64,
+        _h: &str,
+        _b: Vec<Vec<InlineButton>>,
+    ) -> Result<()> {
+        Ok(())
+    }
     async fn delete(&self, _m: i64) -> Result<()> {
         Ok(())
     }
@@ -175,6 +183,22 @@ impl Responder for NullResponder {
     async fn set_chat_theme(&self, _dialog_id: i64, _theme_slug: &str) -> Result<()> {
         Err(crate::Error::Other("NullResponder: no Telegram client".into()))
     }
+
+    async fn create_group_call(&self, _chat_id: i64) -> Result<()> {
+        Err(crate::Error::Other("NullResponder: no Telegram client".into()))
+    }
+
+    async fn discard_group_call(&self, _chat_id: i64) -> Result<()> {
+        Err(crate::Error::Other("NullResponder: no Telegram client".into()))
+    }
+
+    async fn edit_group_call_title(&self, _chat_id: i64, _title: &str) -> Result<()> {
+        Err(crate::Error::Other("NullResponder: no Telegram client".into()))
+    }
+
+    async fn invite_to_group_call(&self, _chat_id: i64, _user_ids: Vec<i64>) -> Result<()> {
+        Err(crate::Error::Other("NullResponder: no Telegram client".into()))
+    }
 }
 
 struct Ping;
@@ -262,7 +286,9 @@ fn test_ctx(text: &str, owner: bool) -> Ctx {
         client_kind: ClientKind::User,
         registry: Arc::new(Registry::new()),
         asst_dialog_id: None,
+        asst_username: None,
         asst: None,
+        vc: None,
     }
 }
 

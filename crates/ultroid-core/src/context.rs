@@ -12,6 +12,7 @@ use crate::rich::RichDoc;
 use crate::router::Registry;
 use crate::strings::Strings;
 use crate::tg::InlineButton;
+use crate::vc::VcHandle;
 use async_trait::async_trait;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -46,6 +47,14 @@ pub trait Responder: Send + Sync {
     /// Edit a message with Telegram-safe HTML (`<b> <i> <code> <a>`,
     /// same subset as `reply_html`).
     async fn edit_html(&self, msg_id: i64, html: &str) -> Result<()>;
+    /// Edit a message's text (HTML) and inline buttons in one call
+    /// (the inline help system edits text + keyboard together).
+    async fn edit_markup(
+        &self,
+        msg_id: i64,
+        html: &str,
+        buttons: Vec<Vec<InlineButton>>,
+    ) -> Result<()>;
     async fn delete(&self, msg_id: i64) -> Result<()>;
     async fn send_file(&self, path: &Path, caption: &str) -> Result<i64>;
     async fn send_rich(&self, doc: &RichDoc) -> Result<i64>;
@@ -216,6 +225,16 @@ pub trait Responder: Send + Sync {
     async fn list_themes(&self) -> Result<Vec<ThemeInfo>>;
     /// Apply a chat theme by slug (`messages.SetChatTheme`).
     async fn set_chat_theme(&self, dialog_id: i64, theme_slug: &str) -> Result<()>;
+    /// Start a group call in the chat (`phone.CreateGroupCall`).
+    async fn create_group_call(&self, chat_id: i64) -> Result<()>;
+    /// Discard (stop) the group call in the chat.
+    async fn discard_group_call(&self, chat_id: i64) -> Result<()>;
+    /// Set the group call's title.
+    async fn edit_group_call_title(&self, chat_id: i64, title: &str) -> Result<()>;
+    /// Invite users to the group call, in batches of 6. Best effort
+    /// per user: users that fail to resolve are skipped; an error is
+    /// returned only when nothing could be invited.
+    async fn invite_to_group_call(&self, chat_id: i64, user_ids: Vec<i64>) -> Result<()>;
 }
 
 /// The context handed to every command handler.
@@ -254,10 +273,17 @@ pub struct Ctx {
     /// Bot API dialog id of the assistant bot, when connected
     /// (for inline-query ops: `.help`, `.gif`, `.icalc`).
     pub asst_dialog_id: Option<i64>,
+    /// Username of the assistant bot (without `@`), when connected.
+    /// Used for the settings URL on the help menu.
+    pub asst_username: Option<String>,
     /// A responder bound to the assistant-bot client for the same peer,
     /// when the assistant is connected. Used by commands that must send
     /// as the assistant bot (bot2bot replies, pmpermit log notes).
     pub asst: Option<Arc<dyn Responder>>,
+    /// Actor handle to the voice engine thread, when the engine was
+    /// started (user client connected, VC enabled). `None` in bot-only
+    /// mode or before the engine thread exists.
+    pub vc: Option<VcHandle>,
 }
 
 impl Ctx {

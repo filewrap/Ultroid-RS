@@ -16,6 +16,7 @@
 pub mod api;
 pub mod bridge;
 pub mod cacher;
+pub mod command;
 pub mod database;
 pub mod dataclass;
 pub mod diagnose;
@@ -40,6 +41,7 @@ mod tests;
 
 pub use api::ApiData;
 pub use bridge::{Bridge, BridgeEvent, CachedCall, CallParticipant};
+pub use command::VcCommand;
 pub use database::VcDatabase;
 pub use dataclass::{CachedTrack, ChannelPlay, MusicTrack, PlatformTracks, TrackInfo};
 pub use dl_helper::SpotifyDownload;

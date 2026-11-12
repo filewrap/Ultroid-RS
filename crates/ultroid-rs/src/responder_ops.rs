@@ -320,6 +320,25 @@ impl Responder for GrammersResponder {
         Ok(())
     }
 
+    async fn edit_markup(
+        &self,
+        msg_id: i64,
+        html: &str,
+        buttons: Vec<Vec<InlineButton>>,
+    ) -> Result<()> {
+        self.client()
+            .edit_message(
+                self.peer(),
+                msg_id as i32,
+                InputMessage::new()
+                    .html(html)
+                    .reply_markup(ultroid_rich::to_reply_markup(&buttons)),
+            )
+            .await
+            .map_err(telegram)?;
+        Ok(())
+    }
+
     async fn delete(&self, msg_id: i64) -> Result<()> {
         self.client()
             .delete_messages(self.peer(), &[msg_id as i32])
@@ -1512,6 +1531,109 @@ impl Responder for GrammersResponder {
             .map_err(telegram)?;
         Ok(())
     }
+
+    async fn create_group_call(&self, chat_id: i64) -> Result<()> {
+        let peer = resolve_ref(self.client(), chat_id).await?;
+        self.client()
+            .invoke(&tl::functions::phone::CreateGroupCall {
+                rtmp_stream: false,
+                peer: (&peer).into(),
+                random_id: rand::random::<i32>(),
+                title: None,
+                schedule_date: None,
+            })
+            .await
+            .map_err(telegram)?;
+        Ok(())
+    }
+
+    async fn discard_group_call(&self, chat_id: i64) -> Result<()> {
+        let call = input_group_call(self.client(), chat_id).await?;
+        self.client()
+            .invoke(&tl::functions::phone::DiscardGroupCall { call })
+            .await
+            .map_err(telegram)?;
+        Ok(())
+    }
+
+    async fn edit_group_call_title(&self, chat_id: i64, title: &str) -> Result<()> {
+        let call = input_group_call(self.client(), chat_id).await?;
+        self.client()
+            .invoke(&tl::functions::phone::EditGroupCallTitle {
+                call,
+                title: title.to_string(),
+            })
+            .await
+            .map_err(telegram)?;
+        Ok(())
+    }
+
+    async fn invite_to_group_call(&self, chat_id: i64, user_ids: Vec<i64>) -> Result<()> {
+        let call = input_group_call(self.client(), chat_id).await?;
+        let mut invited = 0usize;
+        for chunk in user_ids.chunks(6) {
+            let mut users = Vec::new();
+            for uid in chunk {
+                // `resolve_ref` returns Option — a failing resolve skips
+                // that user instead of aborting the whole batch (mirror
+                // of Python's per-user try/except in `vcinvite`).
+                if let Ok(peer) = resolve_ref(self.client(), *uid).await {
+                    users.push(tl::enums::InputUser::from(&peer));
+                }
+            }
+            if users.is_empty() {
+                continue;
+            }
+            self.client()
+                .invoke(&tl::functions::phone::InviteToGroupCall {
+                    call: call.clone(),
+                    users,
+                })
+                .await
+                .map_err(telegram)?;
+            invited += chunk.len();
+        }
+        if invited == 0 {
+            return Err(other(
+                "no invitee could be resolved for this group call".to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// The `InputGroupCall` a chat currently has, via `GetFullChannel` /
+/// `GetFullChat` (same resolution as the VC bridge). Errors when the
+/// chat has no live group call.
+async fn input_group_call(client: &Client, chat_id: i64) -> Result<tl::enums::InputGroupCall> {
+    let peer = resolve_ref(client, chat_id).await?;
+    let input_peer: tl::enums::InputPeer = (&peer).into();
+    let res = match input_peer {
+        tl::enums::InputPeer::Channel(c) => client
+            .invoke(&tl::functions::channels::GetFullChannel {
+                channel: tl::enums::InputChannel::Channel(tl::types::InputChannel {
+                    channel_id: c.channel_id,
+                    access_hash: c.access_hash,
+                }),
+            })
+            .await
+            .map_err(telegram)?,
+        tl::enums::InputPeer::Chat(_) => client
+            .invoke(&tl::functions::messages::GetFullChat { chat_id })
+            .await
+            .map_err(telegram)?,
+        _ => {
+            return Err(other(format!("chat {chat_id} is not a group or channel")));
+        }
+    };
+    let tl::enums::messages::ChatFull::Full(f) = res;
+    let call = match &f.full_chat {
+        tl::enums::ChatFull::Full(c) => c.call.clone(),
+        tl::enums::ChatFull::ChannelFull(c) => c.call.clone(),
+        // `CommunityFull` carries no group call.
+        tl::enums::ChatFull::CommunityFull(_) => None,
+    };
+    call.ok_or_else(|| other(format!("chat {chat_id} has no live group call")))
 }
 
 /// One `StickerSet` TL object (+ its sticker items) as a plain summary.

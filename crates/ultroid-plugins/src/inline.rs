@@ -93,6 +93,8 @@ pub enum InlineQueryKind {
     Alive,
     /// `ultd` → the bot-help menu.
     Help,
+    /// `alive` → the status card from `plugins/bot.py`.
+    AliveStatus,
     /// `pasta-<id>` → Spacebin paste links.
     Pasta(String),
     /// `stf<n>` → a `something()` stored result.
@@ -110,6 +112,9 @@ pub fn parse_inline_query(query: &str) -> InlineQueryKind {
     }
     if q == "ultd" {
         return InlineQueryKind::Help;
+    }
+    if q == "alive" {
+        return InlineQueryKind::AliveStatus;
     }
     if let Some(ok) = q.strip_prefix("pasta-") {
         if !ok.is_empty() {

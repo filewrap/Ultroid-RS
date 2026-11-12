@@ -222,28 +222,25 @@ data.
 
 ## Build status (2026-11-13)
 
-Committed (local, not yet pushed): `4d436fe` core+rich+vc,
+Committed (local, not yet pushed), 13 commits: `4d436fe` core+rich+vc,
 `e4f4b14` agent, `d2c7886` web, `8c23758` assistant,
-`3b56e60` plugins wave B (15 small-media plugins),
-`5600ca9` binary crate. VC resolver/downloader modules
-(`resolver`, `youtube`, `api`, `downloader`, `dl_helper`, `httpx`,
-`saavn`, `jiosaavn`, `spotify`, `yt`) and plugin waves A (20),
-C (8), D (8), G (29) are written, wired, and committed; waves
-E (AI/chat, 6) and F (bot core, 16) are written and wired (all
-102 plugins on the registry) and workspace `cargo check` is clean
-— commit pending in this turn. All check clean; `cargo test`
-passes for core/vc/web.
-
-Remaining before push (integration pass): inline-query routing to
-the `plugins::inline` engine, the `TODO(responder-op)` extension
-pass (370 sites), `_help.py` vs `command_names()`, `cargo build` +
-`cargo test`, README counts finalised.
+`3b56e60` plugins wave B, `5600ca9` binary crate, `a3d86ca` vc
+resolver/downloader, `f8fd0e1` plugin waves A/C/D/G, `76e132c`
+plugin waves E/F (all 102 plugins on the registry), `c79aff5`
+help wiring (`.help <plugin|command>` for real), `bcd9733`
+responder-op trait + grammers impl (43 methods), plus the wiring
+wave (Responder ops wired at ~200 plugin sites) and the VC actor +
+inline engine (group-call ops, `Ctx.vc`, `inline.rs` dispatcher).
+Workspace `cargo check` is clean; `cargo test` passes for
+core/vc/web.
 
 Binary crate (`ultroid-rs/`): `main.rs` (setup gate → config → DB →
 registry → clients → VC engine → mini-app server → update loops),
 `clients.rs` (SenderPool connect + dialog warm-up + bot sign-in),
 `login.rs` (interactive phone-code/2FA), `responder.rs`
-(GrammersResponder; user client refuses rich with `RichOnlyBot`).
+(GrammersResponder; user client refuses rich with `RichOnlyBot`),
+`responder_ops.rs` (the 47-method Responder impl, incl. the
+group-call RPCs), `vc_control.rs` (`VcControl` mpsc handle).
 Callback routing tries the 10 assistant `handle_callback` handlers
 in order, then answers unknown data with exactly "🖐️" (Phase-10
 ruling). VC raw updates fan out through `Bridge::handle_raw_update`
@@ -253,9 +250,24 @@ with chat ids resolved from `Update::GroupCall.peer` or
 VC threading: ntgcalls is `Send` but NOT `Sync`, so `Arc<Engine>`
 can never cross a thread boundary — the engine is built and run
 inside its own OS thread on a current-thread runtime; only `Send`
-handles (the `Bridge`, the DB) move across. Plugin VC commands
-cannot reach the engine through `Shared` for the same reason; they
-need an actor-style handle in the responder-op pass.
+handles (the `Bridge`, the DB) move across.
+
+VC actor (DONE): plugins reach the engine through `VcControl`
+(`core::vc`: `enqueue`/`play_next`/`pause`/`resume`/`mute`/`unmute`/
+`end`, request/reply over oneshot) with a plain-data `VcTrack`
+(mirror of vc `CachedTrack`; the binary converts it back). The
+binary's `VcControlHandle` sends `VcCommand`s over an mpsc channel
+(capacity 32) into the engine thread; `Engine::run` selects on the
+command receiver alongside bridge + ntgcalls events. `Ctx.vc`
+carries the handle (`None` in bot-only mode / before the engine
+starts). Group-call plumbing (`startvc`/`stopvc`/`vctitle`/
+`vcinvite`) is instead four `Responder` methods over raw
+`phone.*` invokes. `vcmusic.rs` is wired to `Ctx.vc` (12 sites: vplay/vskip/
+vpause/vresume/vclear/vcmute/vcunmute through the actor,
+startvc/stopvc/vctitle/vcinvite through the group-call
+`Responder` methods). The reply-sender sites in `ephemeral.rs`,
+`gifts.rs` and `stars.rs` are wired through
+`ctx.reply_to_sender_id` (the binary's single reply fetch).
 
 Help listing: `Registry::set_plugin` tags each module's commands
 (`plugins::register` sets it per module; the binary sets
@@ -264,27 +276,56 @@ groups by plugin in registration order and `Ctx` carries an
 `Arc<Registry>`, so `.help <plugin|command>` renders for real
 (`plugins::help`, porting `_plugin_help_markup` +
 `command_aliases`/`command_syntax`/`command_matches`, edited via
-the new `Responder::edit_html`). Bare `.help` still needs the
-assistant inline-query op (responder-op pass).
+the new `Responder::edit_html`). Bare `.help` is wired via
+`inline_query_click("ultd")`.
 
-Known gaps to close before push (integration pass, after waves land):
-1. InlineQuery/InlineSend/GuestChatQuery routing to the
-   `plugins::inline` engine (wave C defines its binary hook).
-2. `TODO(responder-op)` sites in plugins: the `Responder` trait now
-   carries the full op surface (43 methods in `core::context`, plain
-   data in `core::ops`) and the binary implements all of them in
-   `responder_ops.rs` (verified against grammers 0.12.0 + layer-233 TL;
-   `Ctx` now also carries `reply_to_sender_id`, `asst_dialog_id` and an
-   `asst` responder). Remaining: wire the ~370 plugin sites to the new
-   methods (delegate by family), then the VC actor handle (`VcControl`
-   via an mpsc channel into the engine thread) and the deferred deps
-   (`imageproc` + `ab_glyph` for text-on-image, `rqrr` for QR decode).
+Inline engine (DONE): `crates/ultroid-rs/src/inline.rs` owns the
+assistant-bot inline dispatcher — query routing (empty → alive
+article, `alive` → status card, `ultd` → help article,
+`pasta-<id>` → Paste article, `stf<n>` → Stuff article), the
+deploy inline-send flow (3.5 s delay, invoker-named alive card,
+`alive_deploy_hi` guide edit), and the callback family (`alive`,
+`pkng` ping, `upp` uptime, `ownr` settings, `inlone` inline-plugin
+list, `close`, `assistant:inline:main/help_menu/plugin`,
+`doupdate`/`upd_apply`). Articles are HTML text + entities, never
+RichMessage (grammers drops `rich_message` in `Article::new`).
+`Shared` carries `started`, `owner_name`, `asst_username` and
+`branch` (best-effort `git rev-parse`); the callback uptime reads
+the process-start static `PROCESS_START` set by `main()`.
+`handle_update` routes `InlineQuery`/`InlineSend` (asst client
+only, owner-gated); `GuestChatQuery` is logged only. PMF callbacks
+(`pltog_`/`plact_`/`plman_`/`plph_copy`/`plph_info`) fall through
+to 🖐️ — core's ManifestRegistry has no toggle/action surface.
+`doupdate` truncates the changelog at 900 chars instead of the
+Python file-attach path (no edit-with-file op on the Responder);
+`upd_apply` does not auto-restart (the host process manager owns
+restarts). Bare `.help` is wired via `inline_query_click("ultd")`
+(`plugins::help`).
+
+Known gaps (documented, not stubs — each site fails honestly
+naming the exact missing call; inventory in `RESPONDER_OPS.md`):
+1. `TODO(responder-op)` sites in plugins: 171 remain after the
+   wiring wave (~200 wired). Families: `payments.*` (Stars wallet /
+   top-up / revenue / refund / gifts / giveaways / gift codes),
+   ephemeral/BusinessConnection + quick replies, forum topics,
+   factcheck, block/unblock/report-spam, `UpdateEmojiStatus`,
+   reactions, chat actions (`SetTyping`), effects list,
+   create/delete chats + add/invite + export invite + edit group
+   photo, media-by-reference sends (stored notes/snips/replies),
+   quiz polls (`correct_answers` — `send_poll` has no such slot),
+   custom-emoji-set upload, geo/factcheck/reaction reads off
+   replied messages. A second trait round would need TL
+   verification per RPC; deliberately NOT done in this pass.
    Layer-233 facts learned while writing the impl: `SetChatTheme`
    takes an emoticon-based `InputChatTheme`, not `InputTheme`;
    `messages::ChatFull` has a single `Full` variant; grammers'
    `PhotoSize::make_from` is `pub(crate)` (the binary implements
-   `Downloadable` itself for profile-photo thumbs).
-3. Bare `.help` needs the assistant inline-query op (responder-op
-   pass); `.help <plugin|command>` is wired on the help listing.
-4. `cargo build` (full workspace) + `cargo test`, README counts
+   `Downloadable` itself for profile-photo thumbs); `CommunityFull`
+   has no `call` field; `InviteToGroupCall` has no `rtmp_stream`
+   field.
+2. Deferred deps (`imageproc` + `ab_glyph` for text-on-image,
+   `rqrr` for QR decode) — imaging caption/meme/watermark/
+   codeimg/textimg and `qrcode.rs` qrdecode return honest errors
+   naming the missing dep.
+3. `cargo build` (full workspace) + `cargo test`, README counts
    finalised, then push to filewrap/Ultroid-RS with ls-remote verify.

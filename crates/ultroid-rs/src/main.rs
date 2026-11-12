@@ -13,9 +13,16 @@
 //! grammers sqlite files — never Telethon StringSession strings.
 
 mod clients;
+mod inline;
 mod login;
 mod responder;
 mod responder_ops;
+mod vc_control;
+
+/// Process start, captured once at the top of `main()` (uptime source
+/// for the inline callbacks, which only have a `Ctx`).
+pub(crate) static PROCESS_START: std::sync::OnceLock<std::time::Instant> =
+    std::sync::OnceLock::new();
 
 use grammers_client::{
     Client,
@@ -30,8 +37,10 @@ use tracing_subscriber::EnvFilter;
 use ultroid_core::{
     ChatType, ClientKind, Config, Ctx, Database, Error, Registry, Result, Strings,
     business::GuestMode, db::open_database, listen::WaiterHub, notices::sanitize_error_text,
+    vc::VcHandle,
 };
-use ultroid_vc::{Bridge, Engine, VcDatabase};
+use ultroid_vc::{Bridge, Engine, VcCommand, VcDatabase};
+use vc_control::VcControlHandle;
 
 /// Shared state for every update loop.
 struct Shared {
@@ -47,10 +56,22 @@ struct Shared {
     asst_client: Option<Client>,
     /// Bot API dialog id of the assistant bot, when connected.
     asst_dialog_id: Option<i64>,
+    /// Username of the assistant bot (without `@`), when connected.
+    asst_username: Option<String>,
+    /// Actor handle to the voice engine thread, when it was started.
+    vc: Option<VcHandle>,
+    /// Process start (uptime source for the inline alive cards).
+    started: std::time::Instant,
+    /// Owner's display name (user client's first name).
+    owner_name: String,
+    /// Current git branch of the repo checkout ("unknown" when the
+    /// checkout cannot be read); shown on the alive-status card.
+    branch: String,
 }
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> anyhow::Result<()> {
+    let _ = PROCESS_START.set(std::time::Instant::now());
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
@@ -82,6 +103,7 @@ async fn main() -> anyhow::Result<()> {
     // User client (primary). Skipped in BOT_MODE, where only the bot runs.
     let mut connected_clients: Vec<clients::ConnectedClient> = Vec::new();
     let mut user_client: Option<Client> = None;
+    let mut owner_name = "Owner".to_string();
     if !config.bot_mode {
         let connected =
             clients::connect(&config, &config.session_path("ultroid"), ClientKind::User).await?;
@@ -96,6 +118,10 @@ async fn main() -> anyhow::Result<()> {
             me.username().unwrap_or("?"),
             me.id().bot_api_dialog_id_unchecked()
         );
+        owner_name = me
+            .first_name()
+            .map(str::to_string)
+            .unwrap_or_else(|| "Owner".to_string());
         user_client = Some(connected.client.clone());
         connected_clients.push(connected);
     }
@@ -103,6 +129,7 @@ async fn main() -> anyhow::Result<()> {
     // Assistant bot client.
     let mut asst_client: Option<Client> = None;
     let mut asst_dialog_id: Option<i64> = None;
+    let mut asst_username: Option<String> = None;
     if let Some(token) = &config.bot_token {
         let connected =
             clients::connect(&config, &config.session_path("asst"), ClientKind::AsstBot).await?;
@@ -113,6 +140,7 @@ async fn main() -> anyhow::Result<()> {
             .await
             .map_err(|e| Error::Telegram(e.to_string()))?;
         asst_dialog_id = Some(me.id().bot_api_dialog_id_unchecked());
+        asst_username = Some(me.username().unwrap_or("").to_string());
         tracing::info!(
             "assistant bot signed in as @{} (id {})",
             me.username().unwrap_or("?"),
@@ -139,6 +167,7 @@ async fn main() -> anyhow::Result<()> {
     // -- voice chat: real ntgcalls engine on the user client ---------------
     // (BOT_MODE disables voice entirely, mirroring runtime.py.)
     let mut bridge: Option<Arc<Bridge>> = None;
+    let mut vc: Option<VcHandle> = None;
     if let Some(user) = &user_client {
         if !config.bot_mode {
             let b = Bridge::new(user.clone());
@@ -146,14 +175,16 @@ async fn main() -> anyhow::Result<()> {
             // cross a thread boundary (tokio::spawn and std::thread::spawn
             // both refuse it). The engine is therefore BUILT inside its
             // own OS thread with a current-thread runtime and stays there;
-            // only Send handles (the Bridge, the DB) move across.
+            // only Send handles (the Bridge, the DB) move across. Plugins
+            // reach it through the VcControl mpsc handle below.
+            let (vc_tx, vc_rx) = tokio::sync::mpsc::channel::<VcCommand>(32);
             let bridge_for_vc = b.clone();
             let db_for_vc = db.clone();
             std::thread::Builder::new()
                 .name("vc-engine".into())
                 .spawn(move || {
                     let vc_db = VcDatabase::new(db_for_vc);
-                    let engine = Engine::new(bridge_for_vc, Arc::new(vc_db));
+                    let engine = Engine::new(bridge_for_vc, Arc::new(vc_db), vc_rx);
                     let rt = tokio::runtime::Builder::new_current_thread()
                         .enable_all()
                         .build()
@@ -162,9 +193,20 @@ async fn main() -> anyhow::Result<()> {
                 })?;
             tracing::info!("voice engine started on the user client");
             bridge = Some(b);
+            vc = Some(Arc::new(VcControlHandle::new(vc_tx)));
         }
     }
 
+    // Current git branch for the alive-status card (best effort —
+    // "unknown" when the checkout cannot be read, like Python).
+    let branch = std::process::Command::new("git")
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|b| !b.is_empty())
+        .unwrap_or_else(|| "unknown".to_string());
     let shared = Arc::new(Shared {
         config: config.clone(),
         db: db.clone(),
@@ -176,6 +218,11 @@ async fn main() -> anyhow::Result<()> {
         bridge,
         asst_client,
         asst_dialog_id,
+        asst_username,
+        vc,
+        started: *PROCESS_START.get().unwrap_or(&std::time::Instant::now()),
+        owner_name,
+        branch,
     });
 
     let mut handles = Vec::new();
@@ -250,9 +297,16 @@ async fn handle_update(
             }
             Ok(())
         }
-        // Inline queries / inline sends / guest-chat mentions are answered
-        // by the inline engine (plugins::inline, wave C). Until that
-        // module lands, they are logged, never answered with fake data.
+        Update::InlineQuery(query) => inline::handle_inline_query(shared, kind, query).await,
+        Update::InlineSend(send) => {
+            inline::handle_inline_send(shared, kind, send).await;
+            Ok(())
+        }
+        Update::GuestChatQuery(_) => {
+            // No guest-chat handler exists in the Python source.
+            tracing::debug!("guest chat query (no handler)");
+            Ok(())
+        }
         other => {
             tracing::debug!("unhandled update: {other:?}");
             Ok(())
@@ -351,7 +405,9 @@ async fn handle_message(
         client_kind: kind,
         registry: shared.registry.clone(),
         asst_dialog_id: shared.asst_dialog_id,
+        asst_username: shared.asst_username.clone(),
         asst,
+        vc: shared.vc.clone(),
     };
     match shared.registry.dispatch(&mut ctx).await {
         Ok(_) => Ok(()),
@@ -428,7 +484,9 @@ async fn handle_callback(
         client_kind: kind,
         registry: shared.registry.clone(),
         asst_dialog_id: shared.asst_dialog_id,
+        asst_username: shared.asst_username.clone(),
         asst,
+        vc: shared.vc.clone(),
     };
 
     // Each assistant handler reports whether it owned the data.
@@ -441,7 +499,8 @@ async fn handle_callback(
         || ultroid_assistant::matrix_arcade::handle_callback(&mut ctx, &data).await?
         || ultroid_assistant::rich_showcase::handle_callback(&mut ctx, &data).await?
         || ultroid_assistant::ytdl::handle_callback(&mut ctx, &data).await?
-        || ultroid_assistant::agent::handle_callback(&mut ctx, &data).await?;
+        || ultroid_assistant::agent::handle_callback(&mut ctx, &data).await?
+        || inline::handle_inline_callback(&mut ctx, &query, client).await?;
     if !handled {
         // Unknown callback: exactly "🖐️", no alert.
         if let Err(e) = query.answer().text("🖐️").send().await {

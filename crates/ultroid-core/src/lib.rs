@@ -33,6 +33,7 @@ pub mod toggles;
 pub mod tracer;
 pub mod universal;
 pub mod updater;
+pub mod vc;
 
 pub use config::{Config, ULTROID_VERSION, VERSION};
 pub use context::{ChatType, ClientKind, Ctx, Responder};
@@ -45,6 +46,7 @@ pub use ops::{
 pub use rich::RichDoc;
 pub use router::{CommandDef, CommandHandler, Registry};
 pub use strings::Strings;
+pub use vc::{VcControl, VcTrack};
 
 #[cfg(test)]
 mod tests;

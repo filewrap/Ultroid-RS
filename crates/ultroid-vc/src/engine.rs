@@ -24,6 +24,7 @@
 
 use crate::bridge::{Bridge, BridgeEvent, CallParticipant};
 use crate::cacher::ChatCacher;
+use crate::command::VcCommand;
 use crate::database::VcDatabase;
 use crate::dataclass::CachedTrack;
 use crate::media::{AudioQuality, MediaStream};
@@ -82,10 +83,17 @@ pub struct Engine {
     /// Per-chat play locks (mirrors the Python per-chat lock map).
     locks: Mutex<HashMap<i64, Arc<Mutex<()>>>>,
     events_rx: Mutex<mpsc::UnboundedReceiver<EngineEvent>>,
+    /// Actor commands from plugins, via the binary's `VcControl`
+    /// handle. `None` when the engine runs without a command channel.
+    commands_rx: Mutex<Option<mpsc::Receiver<VcCommand>>>,
 }
 
 impl Engine {
-    pub fn new(bridge: Arc<Bridge>, db: Arc<VcDatabase>) -> Arc<Self> {
+    pub fn new(
+        bridge: Arc<Bridge>,
+        db: Arc<VcDatabase>,
+        commands_rx: mpsc::Receiver<VcCommand>,
+    ) -> Arc<Self> {
         let (tx, rx) = mpsc::unbounded_channel();
         // Register the ntgcalls callbacks while we still own the
         // instance mutably (before the Arc wrap); the callbacks are
@@ -111,6 +119,7 @@ impl Engine {
             pending: Mutex::new(HashMap::new()),
             locks: Mutex::new(HashMap::new()),
             events_rx: Mutex::new(rx),
+            commands_rx: Mutex::new(Some(commands_rx)),
         })
     }
 
@@ -124,9 +133,13 @@ impl Engine {
     }
 
     /// The engine event loop: bridge events (participants / call closed /
-    /// chain blocks / signalling) + ntgcalls events. Spawn it once.
+    /// chain blocks / signalling) + ntgcalls events + actor commands
+    /// from plugins. Spawn it once.
     pub async fn run(self: Arc<Self>) {
         let mut bridge_rx = self.bridge.subscribe();
+        // Take the command receiver out of the struct so the select
+        // arm can borrow it mutably across loop iterations.
+        let mut commands_rx = self.commands_rx.lock().await.take();
         loop {
             tokio::select! {
                 ev = async { self.events_rx.lock().await.recv().await } => {
@@ -146,6 +159,56 @@ impl Engine {
                         Err(_) => break,
                     }
                 }
+                cmd = async {
+                    match &mut commands_rx {
+                        Some(rx) => rx.recv().await,
+                        // No command channel: park this arm forever.
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    if let Some(cmd) = cmd {
+                        self.handle_command(cmd).await;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Execute one actor command and answer its oneshot (the reply
+    /// send is best-effort — the caller may have gone away).
+    async fn handle_command(&self, cmd: VcCommand) {
+        match cmd {
+            VcCommand::Enqueue {
+                chat_id,
+                track,
+                reply,
+            } => {
+                let res = self.enqueue(chat_id, track).await;
+                let _ = reply.send(res);
+            }
+            VcCommand::PlayNext { chat_id, reply } => {
+                let res = self.play_next(chat_id).await;
+                let _ = reply.send(res);
+            }
+            VcCommand::Pause { chat_id, reply } => {
+                let res = self.pause(chat_id).await;
+                let _ = reply.send(res);
+            }
+            VcCommand::Resume { chat_id, reply } => {
+                let res = self.resume(chat_id).await;
+                let _ = reply.send(res);
+            }
+            VcCommand::Mute { chat_id, reply } => {
+                let res = self.mute(chat_id).await;
+                let _ = reply.send(res);
+            }
+            VcCommand::Unmute { chat_id, reply } => {
+                let res = self.unmute(chat_id).await;
+                let _ = reply.send(res);
+            }
+            VcCommand::End { chat_id, reply } => {
+                let res = self.end(chat_id).await;
+                let _ = reply.send(res);
             }
         }
     }

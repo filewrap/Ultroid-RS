@@ -64,6 +64,25 @@ impl InlineButton {
         }
     }
 
+    /// Switch to an inline query in the same chat (Telethon
+    /// `Button.switch_inline(..., same_peer=True)`).
+    pub fn switch_inline(text: impl Into<String>, query: impl Into<String>) -> Self {
+        InlineButton {
+            text: text.into(),
+            action: ButtonAction::SwitchInline(query.into()),
+            style: ButtonStyle::Default,
+        }
+    }
+
+    /// Switch to an inline query in another chat.
+    pub fn switch_inline_elsewhere(text: impl Into<String>, query: impl Into<String>) -> Self {
+        InlineButton {
+            text: text.into(),
+            action: ButtonAction::SwitchInlineElsewhere(query.into()),
+            style: ButtonStyle::Default,
+        }
+    }
+
     pub fn styled(mut self, style: ButtonStyle) -> Self {
         self.style = style;
         self
