@@ -10,43 +10,170 @@
 
 use ultroid_core::Registry;
 
-// Wave B (small media tools) — 15 modules, all ported.
+// Waves A (moderation/admin), B (small media), C (big media + inline
+// + web), D (docs/media + plugin mgmt), G (misc) — 80 modules, all
+// ported. Waves E (AI/chat) and F (bot core) land separately when
+// their workers report.
+pub mod admintools;
+pub mod asstcmd;
 pub mod audiotools;
+pub mod autoban;
 pub mod beautify;
+pub mod blacklist;
+pub mod boosts;
+pub mod bot2bot;
 pub mod calculator;
+pub mod channelhacks;
+pub mod chatactions;
+pub mod cleanaction;
 pub mod compressor;
 pub mod converter;
+pub mod core;
+pub mod downloadupload;
 pub mod emojis;
+pub mod extra;
+pub mod fakeaction;
+pub mod fileshare;
+pub mod filter;
 pub mod fontgen;
+pub mod forcesubscribe;
+pub mod gdrive;
+pub mod genai;
+pub mod genai_module;
+pub mod get_addons;
 pub mod giftools;
+pub mod gifts;
+pub mod giveaways;
 pub mod glitch;
+pub mod globaltools;
+pub mod greetings;
+pub mod guest_manager;
+pub mod howtocuddleme;
 pub mod imaging;
+pub mod inline;
+pub mod listeners;
+pub mod locks;
+pub mod logo;
 pub mod mediatools;
+pub mod notes;
+pub mod other;
+pub mod pdftools;
+pub mod polls;
+pub mod profile;
 pub mod qrcode;
+pub mod redis;
 pub mod resize;
+pub mod schedulemsg;
+pub mod search;
+pub mod snips;
 pub mod specialtools;
+pub mod stars;
+pub mod status;
+pub mod stickertools;
+pub mod storytools;
+pub mod sudo;
+pub mod tag;
+pub mod tools;
+pub mod topics;
+pub mod tracer;
+pub mod usage;
+pub mod userlogs;
+pub mod variables;
+pub mod vcmusic;
+pub mod vctools;
+pub mod videotools;
 pub mod wallpaper;
+pub mod warn;
+pub mod webshot;
+pub mod webtools;
+pub mod webupload;
+pub mod words;
+pub mod writer;
+pub mod youtube;
+pub mod ziptools;
 
 /// Register every ported plugin on the shared registry.
 ///
 /// Modules are added here as their waves land. A module is listed only
 /// once its real port exists — never a placeholder.
 pub fn register(registry: &mut Registry) {
+    admintools::register(registry);
+    asstcmd::register(registry);
     audiotools::register(registry);
+    autoban::register(registry);
     beautify::register(registry);
+    blacklist::register(registry);
+    bot2bot::register(registry);
+    boosts::register(registry);
     calculator::register(registry);
+    channelhacks::register(registry);
+    chatactions::register(registry);
+    cleanaction::register(registry);
     compressor::register(registry);
     converter::register(registry);
+    core::register(registry);
+    downloadupload::register(registry);
     emojis::register(registry);
+    extra::register(registry);
+    fakeaction::register(registry);
+    fileshare::register(registry);
+    filter::register(registry);
     fontgen::register(registry);
+    forcesubscribe::register(registry);
+    gdrive::register(registry);
+    genai::register(registry);
+    genai_module::register(registry);
+    get_addons::register(registry);
     giftools::register(registry);
+    gifts::register(registry);
+    giveaways::register(registry);
     glitch::register(registry);
+    globaltools::register(registry);
+    greetings::register(registry);
+    guest_manager::register(registry);
+    howtocuddleme::register(registry);
     imaging::register(registry);
+    inline::register(registry);
+    listeners::register(registry);
+    locks::register(registry);
+    logo::register(registry);
     mediatools::register(registry);
+    notes::register(registry);
+    other::register(registry);
+    pdftools::register(registry);
+    polls::register(registry);
+    profile::register(registry);
     qrcode::register(registry);
+    redis::register(registry);
     resize::register(registry);
+    schedulemsg::register(registry);
+    search::register(registry);
+    snips::register(registry);
     specialtools::register(registry);
+    stars::register(registry);
+    status::register(registry);
+    stickertools::register(registry);
+    storytools::register(registry);
+    sudo::register(registry);
+    tag::register(registry);
+    tools::register(registry);
+    topics::register(registry);
+    tracer::register(registry);
+    usage::register(registry);
+    userlogs::register(registry);
+    variables::register(registry);
+    vcmusic::register(registry);
+    vctools::register(registry);
+    videotools::register(registry);
     wallpaper::register(registry);
+    warn::register(registry);
+    webshot::register(registry);
+    webtools::register(registry);
+    webupload::register(registry);
+    words::register(registry);
+    writer::register(registry);
+    youtube::register(registry);
+    ziptools::register(registry);
 }
 
 // ── Shared registration helpers ──────────────────────────────────────────

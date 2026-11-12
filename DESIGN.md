@@ -224,13 +224,15 @@ data.
 
 Committed (local, not yet pushed): `4d436fe` core+rich+vc,
 `e4f4b14` agent, `d2c7886` web, `8c23758` assistant,
-`3b56e60` plugins wave B (15 small-media plugins). Binary crate
-(`ultroid-rs/`) written and workspace `cargo check` clean.
-All check clean; `cargo test` passes for core/vc/web.
+`3b56e60` plugins wave B (15 small-media plugins),
+`5600ca9` binary crate. VC resolver/downloader modules
+(`resolver`, `youtube`, `api`, `downloader`, `dl_helper`, `httpx`,
+`saavn`, `jiosaavn`, `spotify`, `yt`) and plugin waves A (20),
+C (8), D (8), G (29) are written, wired (80 plugins on the
+registry), and workspace `cargo check` clean — commit pending in
+this turn. All check clean; `cargo test` passes for core/vc/web.
 
-In flight: VC resolver/downloader modules (`resolver`, `youtube`,
-`api`, `downloader`, `dl_helper`, `httpx`, `saavn`, `jiosaavn`,
-`spotify`, `yt`) and plugin waves A, C, D, E, F, G (87 plugins).
+In flight: plugin waves E (AI/chat, 6) and F (bot core, 16).
 
 Binary crate (`ultroid-rs/`): `main.rs` (setup gate → config → DB →
 registry → clients → VC engine → mini-app server → update loops),

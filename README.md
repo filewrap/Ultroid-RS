@@ -131,13 +131,15 @@ invented.
 
 ## Plugin status
 
-All 102 plugins are ported in `ultroid-plugins` (see `DESIGN.md` for
-the per-plugin table). A small number of plugin operations need raw
-MTProto calls that the `Responder` surface does not yet expose
-(admin actions, fetching arbitrary messages/media, chat info); those
-sites return an honest error naming the missing operation
-(`TODO(responder-op)`) and are listed in `DESIGN.md` — they are wired
-when the `Responder` trait gains those operations.
+80 of the 102 plugins are wired into the registry (`ultroid-plugins`,
+see `DESIGN.md` for the per-plugin table); the remaining 22 files
+(waves E: AI/chat, F: bot core) are written and land when their waves
+report. A small number of plugin operations need raw MTProto calls
+that the `Responder` surface does not yet expose (admin actions,
+fetching arbitrary messages/media, chat info); those sites return an
+honest error naming the missing operation (`TODO(responder-op)`) and
+are listed in `DESIGN.md` — they are wired when the `Responder`
+trait gains those operations.
 
 ## Environment variables
 
