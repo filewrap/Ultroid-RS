@@ -22,8 +22,8 @@
 //! Expired access tokens are refreshed via
 //! `https://oauth2.googleapis.com/token` and the token file is updated.
 //!
-//! Boundary notes (see report): uploading a *replied* Telegram file needs
-//! the media download (TODO(responder-op)); the assistant-bot `/gd*`
+//! Boundary notes (see report): uploading a *replied* Telegram file is
+//! downloaded via the Responder (`download_media`) first; the assistant-bot `/gd*`
 //! stubs and the inline `gdsearch`/`gdlist` handlers are not ported — the
 //! registry already serves both `.` and `/` prefixes, so the asst stubs
 //! ("use on user account") would collide with the real commands, and
@@ -602,6 +602,57 @@ async fn require_creds(ctx: &Ctx) -> Result<()> {
     Ok(())
 }
 
+/// Extension guessed from a file's magic bytes (`None` when unrecognised).
+fn sniff_extension(path: &Path) -> Option<&'static str> {
+    use std::io::Read;
+    let mut buf = [0u8; 12];
+    let n = std::fs::File::open(path)
+        .and_then(|mut f| f.read(&mut buf))
+        .unwrap_or(0);
+    let b = &buf[..n];
+    if b.starts_with(b"%PDF") {
+        Some("pdf")
+    } else if b.starts_with(&[0x89, b'P', b'N', b'G']) {
+        Some("png")
+    } else if b.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        Some("jpg")
+    } else if b.starts_with(b"GIF8") {
+        Some("gif")
+    } else if b.starts_with(b"RIFF") && b.len() >= 12 && &b[8..12] == b"WEBP" {
+        Some("webp")
+    } else if b.starts_with(b"RIFF") {
+        Some("wav")
+    } else if b.len() >= 8 && &b[4..8] == b"ftyp" {
+        Some("mp4")
+    } else if b.starts_with(&[0x1A, 0x45, 0xDF, 0xA3]) {
+        Some("mkv")
+    } else if b.starts_with(b"OggS") {
+        Some("ogg")
+    } else if b.starts_with(b"ID3") || b.starts_with(&[0xFF, 0xFB]) {
+        Some("mp3")
+    } else if b.starts_with(b"PK\x03\x04") {
+        Some("zip")
+    } else {
+        None
+    }
+}
+
+/// Rename `path` in place to carry the extension sniffed from its magic
+/// bytes, when recognised — the Drive upload names the file after it.
+fn with_sniffed_ext(path: &Path) -> PathBuf {
+    match sniff_extension(path) {
+        Some(ext) => {
+            let renamed = path.with_extension(ext);
+            if std::fs::rename(path, &renamed).is_ok() {
+                renamed
+            } else {
+                path.to_path_buf()
+            }
+        }
+        None => path.to_path_buf(),
+    }
+}
+
 // ── commands ──────────────────────────────────────────────────────────────
 
 async fn gdul_cmd(ctx: &Ctx) -> Result<()> {
@@ -624,14 +675,19 @@ async fn gdul_cmd(ctx: &Ctx) -> Result<()> {
         file_path = Some(args);
     }
 
+    let mut downloaded: Option<PathBuf> = None;
     if file_path.is_none() && ctx.reply_to_id.is_some() {
-        // TODO(responder-op): download the replied Telegram file
-        // (`fast_downloader` / `download_media`) and upload it; a replied
-        // folder/album is handled the same way (Python: gdrive.py:gdul).
-        return Err(Error::Other(
-            "download replied Telegram file for Drive upload requires a binary Responder op (Python: gdrive.py:gdul)"
-                .to_string(),
-        ));
+        // Download the replied Telegram file via the Responder and upload
+        // it (Python: gdrive.py:gdul).
+        let reply_id = ctx.reply_to_id.unwrap_or(0);
+        let dest = std::env::temp_dir().join(format!("ultroid-gdrive-{}", uuid::Uuid::new_v4()));
+        let path = ctx
+            .responder
+            .download_media(ctx.chat_id, reply_id as i32, &dest)
+            .await?;
+        let path = with_sniffed_ext(&path);
+        file_path = Some(path.to_string_lossy().into_owned());
+        downloaded = Some(path);
     }
     let Some(file_path) = file_path else {
         ctx.reply_html(&fmtmsg(
@@ -731,6 +787,9 @@ async fn gdul_cmd(ctx: &Ctx) -> Result<()> {
             ctx.edit(status_id, &fmtmsg("GDrive", &[("Error", e.to_string())]))
                 .await?;
         }
+    }
+    if let Some(p) = downloaded {
+        let _ = tokio::fs::remove_file(&p).await;
     }
     Ok(())
 }

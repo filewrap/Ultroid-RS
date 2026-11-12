@@ -16,8 +16,8 @@
 //! registered here.
 //!
 //! `getaudio`/`addaudio` work on local file paths given as arguments and
-//! on replied-to Telegram media once it is on disk. Downloading the
-//! replied media is the single TODO(responder-op) site per command.
+//! on replied-to Telegram media, downloaded via the Responder
+//! (`download_media`).
 //!
 //! Note: Python's `addaudio` ends with `File.clear()` then
 //! `os.remove(File[0])` — an `IndexError` on every successful run.
@@ -90,11 +90,15 @@ pub fn register(registry: &mut Registry) {
 
 // ── shared helpers ────────────────────────────────────────────────────────
 
-/// TODO(responder-op): download replied media to a local file.
-fn todo_download(python_ref: &str) -> Error {
-    Error::Other(format!(
-        "download replied media requires a binary Responder op (Python: {python_ref})"
-    ))
+/// Download the replied media via the Responder into a temp file.
+async fn download_reply(ctx: &Ctx, name: &str) -> Result<PathBuf> {
+    let reply_id = ctx
+        .reply_to_id
+        .ok_or_else(|| Error::Other("reply to a message first".into()))?;
+    let dest = tmp_file(name);
+    ctx.responder
+        .download_media(ctx.chat_id, reply_id as i32, &dest)
+        .await
 }
 
 /// Staged audio file from `.getaudio` (Python's global `File` list).
@@ -138,10 +142,11 @@ async fn getaudio(ctx: &Ctx) -> Result<()> {
         Some(p) => p,
         None => {
             if ctx.reply_to_id.is_some() {
-                return Err(todo_download("specialtools.py:daudtoid"));
+                download_reply(ctx, "staged-audio").await?
+            } else {
+                ctx.reply("Reply to an audio/video to stage it").await?;
+                return Ok(());
             }
-            ctx.reply("Reply to an audio/video to stage it").await?;
-            return Ok(());
         }
     };
     let msg = ctx.reply("Processing...").await?;
@@ -159,10 +164,11 @@ async fn addaudio(ctx: &Ctx) -> Result<()> {
         Some(p) => p,
         None => {
             if ctx.reply_to_id.is_some() {
-                return Err(todo_download("specialtools.py:adaudroid"));
+                download_reply(ctx, "video").await?
+            } else {
+                ctx.reply("Reply to a video/gif to add audio").await?;
+                return Ok(());
             }
-            ctx.reply("Reply to a video/gif to add audio").await?;
-            return Ok(());
         }
     };
     let staged = staged_audio().lock().unwrap().first().cloned();

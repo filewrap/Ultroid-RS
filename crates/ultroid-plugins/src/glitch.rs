@@ -10,8 +10,8 @@
 //! pretends to glitch without the tool.
 //!
 //! The command works on a local file path given as an argument and on
-//! replied-to Telegram media once it is on disk. Downloading the replied
-//! media is the single TODO(responder-op) site.
+//! replied-to Telegram media, downloaded via the Responder
+//! (`download_media`).
 
 use std::path::PathBuf;
 use tokio::process::Command as ProcCommand;
@@ -31,13 +31,6 @@ pub fn register(registry: &mut Registry) {
     );
 }
 
-/// TODO(responder-op): download replied media to a local file.
-fn todo_download(python_ref: &str) -> Error {
-    Error::Other(format!(
-        "download replied media requires a binary Responder op (Python: {python_ref})"
-    ))
-}
-
 fn tmp_file(name: &str) -> PathBuf {
     std::env::temp_dir().join(format!("ultroid-{}-{}", name, uuid::Uuid::new_v4()))
 }
@@ -52,11 +45,15 @@ async fn glitch(ctx: &Ctx) -> Result<()> {
     {
         Some(p) => p,
         None => {
-            if ctx.reply_to_id.is_some() {
-                return Err(todo_download("glitch.py:_"));
+            if let Some(reply_id) = ctx.reply_to_id {
+                let dest = tmp_file("input");
+                ctx.responder
+                    .download_media(ctx.chat_id, reply_id as i32, &dest)
+                    .await?
+            } else {
+                ctx.reply("Reply to an image/sticker to glitch it").await?;
+                return Ok(());
             }
-            ctx.reply("Reply to an image/sticker to glitch it").await?;
-            return Ok(());
         }
     };
     let msg = ctx.reply("Glitching...").await?;

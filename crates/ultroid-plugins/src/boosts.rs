@@ -5,14 +5,14 @@
 //! boost slots (full-sudo). Premium required.
 //!
 //! Argument parsing and the slot-picking rules (explicit slot, else
-//! first free unused non-cooldown slot) are real. The Premium probe
-//! (`get_me` / `is_premium`), peer resolution, and the
-//! `premium.GetBoostsStatusRequest` / `GetMyBoostsRequest` /
-//! `ApplyBoostRequest` RPCs are client calls the `Responder` surface
-//! does not expose yet — each handler validates first, then returns an
-//! honest `TODO(responder-op)` error at that exact point. The status
-//! card is rendered with `RichDoc::markdown` + `send_rich_or_plain`
-//! once the RPC exists (the follow-up pass).
+//! first free unused non-cooldown slot) are real. The status and apply
+//! calls are wired to the `Responder` boost ops (`boost_status`,
+//! `apply_boost`) with a Premium probe via `me()`. Two gaps remain:
+//! `premium.GetMyBoostsRequest` (own slots) has no trait op, so the
+//! status card cannot show your slots and an explicit `[slot]` cannot
+//! be honoured — the apply call lets the server pick — and channel
+//! usernames cannot be resolved (only numeric ids; `resolve_user` is
+//! users-only), so they still return an honest error.
 
 use crate::util::{def, reg_add};
 use ultroid_core::{Ctx, Error, Registry, Result};
@@ -60,12 +60,29 @@ async fn boosts_status(ctx: &Ctx) -> Result<()> {
     } else {
         resolve_channel(raw)?
     };
-    let _id = ctx.reply("`Fetching boost status...`").await?;
-    // TODO(responder-op): premium.GetBoostsStatusRequest(peer) +
-    // premium.GetMyBoostsRequest() (Python: boosts.py:_boosts_status).
-    Err(boosts_op(&format!(
-        "premium.GetBoostsStatusRequest(peer={target})"
-    )))
+    let id = ctx.reply("`Fetching boost status...`").await?;
+    let me = ctx.responder.me().await?;
+    if !me.premium {
+        ctx.edit(id, PREMIUM_REQUIRED).await?;
+        return Ok(());
+    }
+    // premium.GetBoostsStatusRequest(peer) (Python: boosts.py:_boosts_status).
+    // premium.GetMyBoostsRequest (own slots) has no trait op, so the
+    // card shows level / count / next level only.
+    let status = ctx.responder.boost_status(target).await?;
+    let mut lines = vec![
+        format!("**Boost status** for `{target}`:"),
+        format!("Level: **{}**", status.level),
+        format!("Boosts: **{}**", status.boosts),
+    ];
+    if let Some(gift) = status.gift_boosts {
+        lines.push(format!("Boosts from you: **{gift}**"));
+    }
+    match status.next_level_boosts {
+        Some(next) => lines.push(format!("Next level at: **{next}** boosts")),
+        None => lines.push("Next level: **max level reached**".to_string()),
+    }
+    ctx.edit(id, &lines.join("\n")).await
 }
 
 async fn boost_apply(ctx: &Ctx) -> Result<()> {
@@ -84,10 +101,21 @@ async fn boost_apply(ctx: &Ctx) -> Result<()> {
         }
     }
     let target = resolve_channel(channel_token)?;
-    // TODO(responder-op): Premium probe (`get_me` + `is_premium`),
-    // then premium.GetMyBoostsRequest() for auto slot-pick (or the
-    // explicit slot), then premium.ApplyBoostRequest(peer, slots=[slot])
-    // (Python: boosts.py:_boost_apply).
-    let _ = target;
-    Err(boosts_op("Premium probe + premium.ApplyBoostRequest"))
+    let me = ctx.responder.me().await?;
+    if !me.premium {
+        ctx.reply(PREMIUM_REQUIRED).await?;
+        return Ok(());
+    }
+    if slot_token.is_some() {
+        // An explicit slot needs premium.GetMyBoostsRequest to validate
+        // and pick it, which has no trait op; `apply_boost` lets the
+        // server pick a slot.
+        return Err(boosts_op(
+            "premium.GetMyBoostsRequest (explicit boost slot selection)",
+        ));
+    }
+    // premium.ApplyBoostRequest(peer) (Python: boosts.py:_boost_apply).
+    ctx.responder.apply_boost(target).await?;
+    ctx.reply(&format!("`Boosted {channel_token}.`")).await?;
+    Ok(())
 }

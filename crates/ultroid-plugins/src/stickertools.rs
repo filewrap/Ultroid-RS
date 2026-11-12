@@ -10,15 +10,14 @@
 //! * `.emojiset <pack-link-or-shortname>` — list a custom-emoji pack.
 //! * `.emojireply <shortname:index|doc_id> [text]` — reply with a custom emoji.
 //!
-//! The sticker-set RPCs (`messages.GetStickerSetRequest`,
-//! `stickers.CreateStickerSetRequest`,
-//! `messages.GetCustomEmojiDocumentsRequest`), replied-media downloads,
-//! and the @Stickers bot conversation cannot be expressed through the
-//! `Ctx`/`Responder` surface — those points return honest
-//! `TODO(responder-op)` errors, and every pure piece around them
-//! (arg parsing, pack-name math, HTTP pack-exists check, image/WebM/
-//! lottie work, JSON mangling, emoji-pack parsing) is implemented for
-//! real and exposed as `pub` helpers for the binary follow-up pass.
+//! The sticker-set fetch (`.emojiset`) is wired to the `Responder`
+//! `sticker_set` op, and `.round` / `.destroy` / `.tiny` are wired to
+//! `download_media` plus the pure media helpers in this file. The
+//! @Stickers bot conversation (`.kang`, `.pamck` pack creation) and
+//! sending a custom emoji (`.emojireply`, which needs a custom-emoji
+//! message entity) have no trait op and still return honest
+//! `TODO(responder-op)` errors, as does everything else whose op is
+//! missing.
 //! Local media work uses the `image` crate and ffmpeg; `.tgs` work
 //! drives the `lottie_convert.py` CLI (same tool Python's `con` uses).
 
@@ -520,47 +519,116 @@ async fn kang(ctx: &Ctx) -> Result<()> {
 }
 
 async fn round_cmd(ctx: &Ctx) -> Result<()> {
-    if ctx.reply_to_id.is_none() {
-        ctx.reply(&ctx.get_str("sts_10")).await?;
-        return Ok(());
-    }
-    let _processing = ctx.reply(&ctx.get_str("com_1")).await?;
-    // TODO(responder-op): download replied media, convert to PNG
-    // (Python: stickertools.py:ultdround — `download_media` + `con.convert`)
-    Err(Error::Other(
-        "downloading replied media requires a binary Responder op (Python: stickertools.py:ultdround)"
-            .to_string(),
-    ))
+    let reply_id = match ctx.reply_to_id {
+        Some(id) => id,
+        None => {
+            ctx.reply(&ctx.get_str("sts_10")).await?;
+            return Ok(());
+        }
+    };
+    let processing = ctx.reply(&ctx.get_str("com_1")).await?;
+    // Download replied media, then apply the circular mask
+    // (Python: stickertools.py:ultdround — `download_media` + `con.convert`).
+    let dest = std::env::temp_dir().join(format!("ultroid-round-{}", uuid::Uuid::new_v4()));
+    let path = ctx
+        .responder
+        .download_media(ctx.chat_id, reply_id as i32, &dest)
+        .await?;
+    let out = std::env::temp_dir().join(format!("ultroid-round-{}.webp", uuid::Uuid::new_v4()));
+    let res = round_sticker_image(&path, &out);
+    let _ = tokio::fs::remove_file(&path).await;
+    res?;
+    ctx.send_file(&out, "").await?;
+    let _ = ctx.delete(processing).await;
+    let _ = tokio::fs::remove_file(&out).await;
+    Ok(())
 }
 
 async fn destroy_cmd(ctx: &Ctx) -> Result<()> {
-    if ctx.reply_to_id.is_none() {
-        ctx.reply(&ctx.get_str("sts_2")).await?;
-        return Ok(());
+    let reply_id = match ctx.reply_to_id {
+        Some(id) => id,
+        None => {
+            ctx.reply(&ctx.get_str("sts_2")).await?;
+            return Ok(());
+        }
+    };
+    let processing = ctx.reply(&ctx.get_str("com_1")).await?;
+    // Download the replied animated sticker as .tgs, mangle its Lottie
+    // JSON, convert back, send it (Python: stickertools.py:ultdestroy).
+    // The "animated" check is implicit: `lottie_convert` fails honestly
+    // if the download is not a Lottie file.
+    let tag = uuid::Uuid::new_v4();
+    let input = std::env::temp_dir().join(format!("ultroid-destroy-{tag}.tgs"));
+    ctx.responder
+        .download_media(ctx.chat_id, reply_id as i32, &input)
+        .await?;
+    let json_path = std::env::temp_dir().join(format!("ultroid-destroy-{tag}.json"));
+    let out = std::env::temp_dir().join(format!("ultroid-destroyed-{tag}.tgs"));
+    let res = async {
+        lottie_convert(&input, &json_path).await?;
+        let jsn = tokio::fs::read_to_string(&json_path).await?;
+        tokio::fs::write(&json_path, destroy_mangle_json(&jsn)).await?;
+        lottie_convert(&json_path, &out).await
     }
-    let _processing = ctx.reply(&ctx.get_str("com_1")).await?;
-    // TODO(responder-op): download the replied animated sticker as
-    // `ultroid.tgs` (Python: stickertools.py:ultdestroy — needs the
-    // replied message's media + the "animated" mediainfo check)
-    Err(Error::Other(
-        "downloading the replied animated sticker requires a binary Responder \
-         op (Python: stickertools.py:ultdestroy)"
-            .to_string(),
-    ))
+    .await;
+    let _ = tokio::fs::remove_file(&input).await;
+    let _ = tokio::fs::remove_file(&json_path).await;
+    let out = res?;
+    ctx.send_file(&out, "").await?;
+    let _ = ctx.delete(processing).await;
+    let _ = tokio::fs::remove_file(&out).await;
+    Ok(())
+}
+
+/// Is this file a gzipped Lottie (`.tgs`) file? (gzip magic bytes.)
+fn is_gzip(path: &Path) -> bool {
+    std::fs::read(path)
+        .map(|b| b.len() >= 2 && b[0] == 0x1f && b[1] == 0x8b)
+        .unwrap_or(false)
 }
 
 async fn tiny_cmd(ctx: &Ctx) -> Result<()> {
-    if ctx.reply_to_id.is_none() {
-        ctx.reply(&ctx.get_str("sts_10")).await?;
-        return Ok(());
-    }
-    let _processing = ctx.reply(&ctx.get_str("com_1")).await?;
-    // TODO(responder-op): download replied media (Python:
-    // stickertools.py:ultiny — `reply.download_media()`)
-    Err(Error::Other(
-        "downloading replied media requires a binary Responder op (Python: stickertools.py:ultiny)"
-            .to_string(),
-    ))
+    let reply_id = match ctx.reply_to_id {
+        Some(id) => id,
+        None => {
+            ctx.reply(&ctx.get_str("sts_10")).await?;
+            return Ok(());
+        }
+    };
+    let processing = ctx.reply(&ctx.get_str("com_1")).await?;
+    // Download replied media (Python: stickertools.py:ultiny —
+    // `reply.download_media()`), then branch on what it actually is,
+    // as Python branches on the downloaded file's extension:
+    // `.tgs` -> Lottie path, video -> first frame, else static image.
+    let dest = std::env::temp_dir().join(format!("ultroid-tiny-{}", uuid::Uuid::new_v4()));
+    let path = ctx
+        .responder
+        .download_media(ctx.chat_id, reply_id as i32, &dest)
+        .await?;
+    let out_path: PathBuf = if is_gzip(&path) {
+        tiny_tgs(&path).await?
+    } else if image::open(&path).is_ok() {
+        let out = std::env::temp_dir().join(format!("ultroid-tiny-{}.webp", uuid::Uuid::new_v4()));
+        tiny_static_image(&path, &out)?;
+        out
+    } else {
+        let frame =
+            std::env::temp_dir().join(format!("ultroid-tiny-frame-{}.png", uuid::Uuid::new_v4()));
+        video_first_frame(&path, &frame).await?;
+        let out = std::env::temp_dir().join(format!("ultroid-tiny-{}.webp", uuid::Uuid::new_v4()));
+        let res = tiny_static_image(&frame, &out);
+        let _ = tokio::fs::remove_file(&frame).await;
+        res?;
+        out
+    };
+    let _ = tokio::fs::remove_file(&path).await;
+    ctx.send_file(&out_path, "").await?;
+    let _ = ctx.delete(processing).await;
+    // `tiny_tgs` returns the fixed `ult.tgs` in the working directory;
+    // the static/video branches return a temp path. Either way the
+    // sent file is removed after sending.
+    let _ = tokio::fs::remove_file(&out_path).await;
+    Ok(())
 }
 
 async fn emoji_set_list(ctx: &Ctx) -> Result<()> {
@@ -578,15 +646,35 @@ async fn emoji_set_list(ctx: &Ctx) -> Result<()> {
         .await?;
         return Ok(());
     };
-    let _processing = ctx.reply(&ctx.get_str("com_1")).await?;
-    let _ = short_name;
-    // TODO(responder-op): messages.GetStickerSetRequest with
-    // InputStickerSetShortName (Python: stickertools.py:_get_emoji_stickerset)
-    Err(Error::Other(
-        "messages.GetStickerSetRequest requires a binary Responder op \
-         (Python: stickertools.py:_get_emoji_stickerset)"
-            .to_string(),
-    ))
+    let processing = ctx.reply(&ctx.get_str("com_1")).await?;
+    // messages.GetStickerSetRequest with InputStickerSetShortName
+    // (Python: stickertools.py:_get_emoji_stickerset).
+    let set = ctx.responder.sticker_set(&short_name).await?;
+    if !set.emojis {
+        ctx.reply(&format!(
+            "`\"{}\" ({short_name}) is a regular sticker pack, not a custom-emoji pack — try .pamck/.kang for stickers instead.`",
+            set.title
+        ))
+        .await?;
+        return Ok(());
+    }
+    if set.stickers.is_empty() {
+        ctx.reply(&format!(
+            "`\"{}\" ({short_name}) has no emoji in it.`",
+            set.title
+        ))
+        .await?;
+        return Ok(());
+    }
+    let docs: Vec<(String, i64)> = set
+        .stickers
+        .iter()
+        .map(|s| (s.emoji.clone(), s.document_id))
+        .collect();
+    let text = format_emoji_list(&set.title, &set.short_name, &docs);
+    ctx.reply(&text).await?;
+    let _ = ctx.delete(processing).await;
+    Ok(())
 }
 
 async fn emoji_reply(ctx: &Ctx) -> Result<()> {

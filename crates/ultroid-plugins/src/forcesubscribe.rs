@@ -14,7 +14,7 @@ use crate::util::{def, reg_add};
 use serde_json::Value;
 use std::collections::HashMap;
 use ultroid_core::db::{db_get_json, db_set_json};
-use ultroid_core::{CommandDef, Ctx, Error, Registry, Result};
+use ultroid_core::{BannedRights, CommandDef, Ctx, Error, Registry, Result};
 
 pub const HELP: &str = "✘ Commands Available -\n\n• `{i}fsub <chat username><id>`\n    Enable ForceSub in Used Chat !\n\n• `{i}checkfsub`\n    Check/Get Active ForceSub Setting of Used Chat.\n\n• `{i}remfsub`\n    Remove ForceSub from Used Chat !\n\n    Note - You Need to be Admin in Both Channel/Chats\n        in order to Use ForceSubscribe.\n";
 
@@ -99,15 +99,41 @@ async fn check_forcesub(ctx: &Ctx) -> Result<()> {
         None => {
             ctx.reply("ForceSub is Not Active In This Chat !").await?;
         }
-        Some(_channel_id) => {
-            // TODO(responder-op): get_entity(channel_id) for the title.
-            // Python: forcesubscribe.py:getfsr.
-            return Err(Error::Other(
-                "get channel entity requires a binary Responder op (Python: plugins/forcesubscribe.py:getfsr)".into(),
-            ));
+        Some(channel_id) => {
+            let title = ctx.responder.chat_info(channel_id).await?.title;
+            ctx.reply(&format!(
+                "**ForceSub Status** : `Active`\n- **{title}** `({channel_id})`"
+            ))
+            .await?;
         }
     }
     Ok(())
+}
+
+/// Is this user a participant of the channel? The trait has no
+/// `GetParticipant` op, so this pages `participants` until the user is
+/// found or the list is exhausted.
+async fn is_channel_member(ctx: &Ctx, channel_id: i64, user_id: i64) -> Result<bool> {
+    let mut offset = 0;
+    loop {
+        let (page, total) = ctx.responder.participants(channel_id, 200, offset).await?;
+        if page.iter().any(|p| p.user.id == user_id) {
+            return Ok(true);
+        }
+        offset += page.len() as i32;
+        if page.is_empty() || offset >= total {
+            return Ok(false);
+        }
+    }
+}
+
+/// The mute rights Python uses (`edit_permissions(..., send_messages=
+/// False)`): only the send-messages right is banned.
+fn mute_rights() -> BannedRights {
+    BannedRights {
+        send_messages: true,
+        ..Default::default()
+    }
 }
 
 /// Message-count cache for the enforcement watcher (Python `CACHE`):
@@ -153,26 +179,54 @@ pub fn forcesub_prompt(user_mention: &str, channel_title: &str) -> String {
 
 /// Unmute a user after they joined the required channel
 /// (Python `diesoon`): checks membership, then unmutes.
-pub async fn unmute_after_join(_ctx: &Ctx, _user_id: i64, _channel_id: i64) -> Result<()> {
-    // TODO(responder-op): GetParticipantRequest + edit_permissions.
-    // Python: plugins/forcesubscribe.py:diesoon.
-    Err(Error::Other(
-        "check channel membership + unmute requires a binary Responder op (Python: plugins/forcesubscribe.py:diesoon)".into(),
-    ))
+pub async fn unmute_after_join(ctx: &Ctx, user_id: i64, channel_id: i64) -> Result<()> {
+    if !is_channel_member(ctx, channel_id, user_id).await? {
+        return Err(Error::Other(
+            "Please Join That Channel !\nThen Click This Button !".to_string(),
+        ));
+    }
+    // Python: edit_permissions(chat, user, send_messages=True,
+    // until_date=None) — `unban_user` clears the banned rights, which
+    // lifts the send ban.
+    ctx.responder.unban_user(ctx.chat_id, user_id).await?;
+    Ok(())
 }
 
 /// Enforce force-sub on one incoming message (Python `force_sub`):
 /// mute the non-member, then prompt them via the assistant inline query.
 pub async fn enforce_forcesub(
-    _ctx: &Ctx,
-    _chat_id: i64,
-    _user_id: i64,
-    _channel_id: i64,
-    _sender_is_bot: bool,
+    ctx: &Ctx,
+    chat_id: i64,
+    user_id: i64,
+    channel_id: i64,
+    sender_is_bot: bool,
 ) -> Result<()> {
-    // TODO(responder-op): get_permissions + edit_permissions + inline
-    // query + click. Python: plugins/forcesubscribe.py:force_sub.
-    Err(Error::Other(
-        "force-sub enforcement (participant check + mute + inline prompt) requires a binary Responder op (Python: plugins/forcesubscribe.py:force_sub)".into(),
-    ))
+    // Python: get_permissions(channel, user) succeeds for members.
+    if is_channel_member(ctx, channel_id, user_id).await? {
+        return Ok(());
+    }
+    if sender_is_bot {
+        // Channel senders get banned (view_messages=False) and no prompt.
+        ctx.responder
+            .ban_user(chat_id, user_id, BannedRights::all_banned())
+            .await?;
+        return Ok(());
+    }
+    ctx.responder
+        .ban_user(chat_id, user_id, mute_rights())
+        .await?;
+    let Some(asst_id) = ctx.asst_dialog_id else {
+        return Err(Error::Other(
+            "assistant bot is not connected, cannot send the force-sub prompt".to_string(),
+        ));
+    };
+    ctx.responder
+        .inline_query_click(
+            asst_id,
+            &format!("fsub {user_id}_{channel_id}"),
+            chat_id,
+            None,
+        )
+        .await?;
+    Ok(())
 }

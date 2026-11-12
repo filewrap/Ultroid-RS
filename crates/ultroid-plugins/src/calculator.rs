@@ -156,14 +156,19 @@ async fn calc(ctx: &Ctx) -> Result<()> {
     let expr = ctx.args.trim();
     if expr.is_empty() {
         // Python: inline-query the assistant bot for "calc" and click the
-        // result — inline queries/clicks need the Telegram client.
-        // TODO(responder-op): inline_query(assistant, "calc") + click
-        // (Python: calculator.py:icalc). The keypad state is stored in
-        // udB so a wired keypad can resume it.
+        // result (Python: calculator.py:icalc). The keypad state is stored
+        // in udB so a wired keypad can resume it.
         let _ = db_get_json::<String>(&*ctx.db, &calc_key(ctx)).await?;
-        return Err(Error::Other(
-            "opening the inline calculator keypad requires a binary Responder op (inline_query to the assistant bot) (Python: calculator.py:icalc)".into(),
-        ));
+        let Some(asst_id) = ctx.asst_dialog_id else {
+            return Err(Error::Other(
+                "opening the inline calculator keypad requires the assistant bot to be connected"
+                    .into(),
+            ));
+        };
+        ctx.responder
+            .inline_query_click(asst_id, "calc", ctx.chat_id, None)
+            .await?;
+        return Ok(());
     }
     // Keypad-style normalisation: `x`/`÷` are the keypad's `*`/`/`.
     let normalised = expr.replace('x', "*").replace('÷', "/");

@@ -6,10 +6,13 @@
 //! `GBLACKLISTS` is a list of chat ids excluded from global broadcasts.
 //!
 //! All argument parsing, DB reads/writes and reply text is ported.
-//! Every loop over dialogs and every permission/ban/block RPC needs raw
-//! client calls the `Ctx` surface does not expose — each such site returns
-//! the honest `TODO(responder-op)` error at the exact point the RPC would
-//! run.
+//! Dialog iteration + promote / demote / kick / mute / unmute /
+//! broadcasts / the gbanned-list file are wired to the `Responder` ops.
+//! `gban` / `ungban` still need `contacts.Block` / `UnblockRequest`,
+//! which the trait does not expose, and `gadmincast` still needs a
+//! per-chat admin-rights check the trait does not expose, so those
+//! sites return the honest `TODO(responder-op)` error at the exact
+//! point the RPC would run.
 //!
 //! Note the patterns are kept exactly as written in Python, including the
 //! literal `dbs.gban_mute.<cmd>` prefixes on `gban`/`ungban`/`gmute`/
@@ -19,7 +22,8 @@
 use crate::util::{def, reg_add};
 use std::collections::HashMap;
 use ultroid_core::db::{db_get_json, db_set_json};
-use ultroid_core::{CommandDef, Ctx, Error, Registry, Result};
+use ultroid_core::tg::InlineButton;
+use ultroid_core::{AdminRights, BannedRights, ChatKind, CommandDef, Ctx, Error, Registry, Result};
 
 pub const HELP: &str = "✘ Commands Available -\n\n• `{i}gban <reply user/ username>`\n• `{i}ungban`\n    Ban/Unban Globally.\n\n• `{i}gstat <reply to user/userid/username>`\n   Check if user is GBanned.\n\n• `{i}listgban` : List all GBanned users.\n\n• `{i}gmute` | `{i}ungmute` <reply user/ username>\n    Mute/UnMute Globally.\n\n• `{i}gkick <reply/username>` `Globally Kick User`\n• `{i}gcast <text/reply>` `Globally Send msg in all grps`\n\n• `{i}gadmincast <text/reply>` `Globally broadcast in your admin chats`\n• `{i}gucast <text/reply>` `Globally send msg in all pm users`\n\n• `{i}gblacklist <chat id/username/nothing (for current chat)`\n   Add chat to blacklist and ignores global broadcast.\n• `{i}ungblacklist` `Remove the chat from blacklist.`\n\n• `{i}gpromote <reply to user> <channel/group/all> <rank>`\n    globally promote user where you are admin\n    - Set whether To promote only in groups/channels/all.\n      Eg- `gpromote group boss` ~ promotes user in all grps.\n        `gpromote @username all sar` ~ promote the user in all group & channel\n• `{i}gdemote` - `demote user globally`\n";
 
@@ -174,13 +178,98 @@ fn resolve_target(ctx: &Ctx) -> Target {
     }
 }
 
-fn target_or_todo(ctx: &Ctx, py_fn: &str) -> Result<i64> {
+/// Resolve a target user id: reply -> the replied message's sender
+/// (from `ctx.reply_to_sender_id`); numeric arg -> id; `@username` /
+/// text id -> `resolve_user`.
+async fn target_or_todo(ctx: &Ctx, _py_fn: &str) -> Result<i64> {
     match resolve_target(ctx) {
         Target::Resolved(id) => Ok(id),
-        Target::NeedReplySender => Err(todo_op("get replied message sender", py_fn)),
-        Target::NeedResolve => Err(todo_op("resolve user id/username", py_fn)),
+        Target::NeedReplySender => ctx.reply_to_sender_id.ok_or_else(|| {
+            Error::Other("could not determine the replied message's sender".to_string())
+        }),
+        Target::NeedResolve => {
+            let first = ctx.args.trim().split_whitespace().next().unwrap_or("");
+            Ok(ctx.responder.resolve_user(first).await?.id)
+        }
         Target::Missing => Err(Error::Other("missing_target".to_string())),
     }
+}
+
+/// The chat kind of a dialog, via `chat_info` (`DialogInfo` itself
+/// carries no kind). `None` when the fetch fails.
+async fn dialog_kind(ctx: &Ctx, dialog_id: i64) -> Option<ChatKind> {
+    ctx.responder
+        .chat_info(dialog_id)
+        .await
+        .ok()
+        .map(|c| c.kind)
+}
+
+/// Is this dialog a group (plain or super) or a channel, per Python's
+/// `Dialog.is_group or Dialog.is_channel`?
+async fn is_group_or_channel(ctx: &Ctx, dialog_id: i64) -> bool {
+    matches!(
+        dialog_kind(ctx, dialog_id).await,
+        Some(ChatKind::Group) | Some(ChatKind::Supergroup) | Some(ChatKind::Channel)
+    )
+}
+
+/// Kick a user: Telethon `kick_participant` is a ban followed by an
+/// immediate unban.
+async fn kick_user(ctx: &Ctx, chat_id: i64, user_id: i64) -> Result<()> {
+    ctx.responder
+        .ban_user(chat_id, user_id, BannedRights::all_banned())
+        .await?;
+    ctx.responder.unban_user(chat_id, user_id).await
+}
+
+/// The mute rights Python uses everywhere (`edit_permissions(...,
+/// send_messages=False)`): only the send-messages right is banned,
+/// view-messages stays open.
+fn mute_rights(until: Option<i32>) -> BannedRights {
+    BannedRights {
+        until_date: until,
+        send_messages: true,
+        ..Default::default()
+    }
+}
+
+/// The fixed global-promote rights (Python `_gpromote_rights`).
+fn gpromote_rights() -> AdminRights {
+    AdminRights {
+        invite_users: true,
+        ban_users: true,
+        delete_messages: true,
+        pin_messages: true,
+        ..Default::default()
+    }
+}
+
+/// Parse `[label | url]` button JSON (from `split_msg_button`) into
+/// inline URL buttons. `None` when there are no buttons or the JSON
+/// does not parse.
+fn parse_buttons(btn_json: &str) -> Option<Vec<Vec<InlineButton>>> {
+    let rows: Vec<Vec<(String, String)>> = serde_json::from_str(btn_json).ok()?;
+    Some(
+        rows.into_iter()
+            .map(|row| {
+                row.into_iter()
+                    .map(|(label, url)| InlineButton::url(label, url))
+                    .collect()
+            })
+            .collect(),
+    )
+}
+
+/// Send a broadcast text (+ optional buttons) to one dialog, returning
+/// `true` on success. Per-chat errors are swallowed by the caller,
+/// exactly like Python's per-dialog `try/except: pass`.
+async fn broadcast_send(ctx: &Ctx, dialog_id: i64, msg: &str, btn: &Option<String>) -> bool {
+    let res = match btn.as_deref().and_then(parse_buttons) {
+        Some(buttons) => ctx.responder.send_markup_to(dialog_id, msg, buttons).await,
+        None => ctx.responder.send_to(dialog_id, msg).await,
+    };
+    res.is_ok()
 }
 
 /// The scope key for gpromote/gdemote: "group", "channel" or "all".
@@ -204,35 +293,51 @@ async fn gpromote(ctx: &Ctx) -> Result<()> {
         ctx.reply(&ctx.get_str("schdl_2")).await?;
         return Ok(());
     }
-    if ctx.reply_to_id.is_some() {
+    let (user_id, key, rank) = if ctx.reply_to_id.is_some() {
         let tokens: Vec<&str> = ctx.text.split_whitespace().collect();
         let key = promote_scope(&tokens, 1);
         let rank = tokens.get(2).copied().unwrap_or("AdMin");
-        let _ = (key, rank);
-        // TODO(responder-op): replied sender + iter_dialogs + EditAdminRequest.
-        return Err(todo_op(
-            "global promote (iter dialogs + EditAdminRequest)",
-            "plugins/globaltools.py:gpromote",
-        ));
-    }
-    let tokens: Vec<&str> = ctx.text.split_whitespace().collect();
-    let user_tok = tokens.get(1).copied().unwrap_or("");
-    let user_id: i64 = match user_tok.trim_start_matches('@').parse() {
-        Ok(id) => id,
-        Err(_) => {
-            return Err(todo_op(
-                "resolve user id/username",
-                "plugins/globaltools.py:gpromote",
-            ));
-        }
+        let user_id = ctx.reply_to_sender_id.ok_or_else(|| {
+            Error::Other("could not determine the replied message's sender".to_string())
+        })?;
+        (user_id, key, rank.to_string())
+    } else {
+        let tokens: Vec<&str> = ctx.text.split_whitespace().collect();
+        let user_tok = tokens.get(1).copied().unwrap_or("");
+        let user_id = match user_tok.trim_start_matches('@').parse::<i64>() {
+            Ok(id) => id,
+            Err(_) => ctx.responder.resolve_user(user_tok).await?.id,
+        };
+        let key = promote_scope(&tokens, 2);
+        let rank = tokens.get(3).copied().unwrap_or("AdMin");
+        (user_id, key, rank.to_string())
     };
-    let key = promote_scope(&tokens, 2);
-    let rank = tokens.get(3).copied().unwrap_or("AdMin");
-    let _ = (user_id, key, rank);
-    Err(todo_op(
-        "global promote (iter dialogs + EditAdminRequest)",
-        "plugins/globaltools.py:gpromote",
-    ))
+    // Python iterates dialogs, promotes in the scoped chats and swallows
+    // per-chat errors, counting successes.
+    let mut _count = 0;
+    for dialog in ctx.responder.dialogs().await? {
+        let kind = dialog_kind(ctx, dialog.id).await;
+        let in_scope = match key {
+            "group" => matches!(kind, Some(ChatKind::Group) | Some(ChatKind::Supergroup)),
+            "channel" => matches!(kind, Some(ChatKind::Channel)),
+            _ => matches!(
+                kind,
+                Some(ChatKind::Group) | Some(ChatKind::Supergroup) | Some(ChatKind::Channel)
+            ),
+        };
+        if !in_scope {
+            continue;
+        }
+        if ctx
+            .responder
+            .promote_user(dialog.id, user_id, gpromote_rights(), &rank)
+            .await
+            .is_ok()
+        {
+            _count += 1;
+        }
+    }
+    Ok(())
 }
 
 async fn gdemote(ctx: &Ctx) -> Result<()> {
@@ -241,31 +346,47 @@ async fn gdemote(ctx: &Ctx) -> Result<()> {
         ctx.reply(&ctx.get_str("schdl_2")).await?;
         return Ok(());
     }
-    if ctx.reply_to_id.is_some() {
+    let (user_id, key) = if ctx.reply_to_id.is_some() {
         let tokens: Vec<&str> = ctx.text.split_whitespace().collect();
         let key = promote_scope(&tokens, 1);
-        let _ = key;
-        return Err(todo_op(
-            "global demote (iter dialogs + EditAdminRequest)",
-            "plugins/globaltools.py:gdemote",
-        ));
-    }
-    let tokens: Vec<&str> = ctx.text.split_whitespace().collect();
-    let user_tok = tokens.get(1).copied().unwrap_or("");
-    let user_id: i64 = match user_tok.trim_start_matches('@').parse() {
-        Ok(id) => id,
-        Err(_) => {
-            return Err(todo_op(
-                "resolve user id/username",
-                "plugins/globaltools.py:gdemote",
-            ));
-        }
+        let user_id = ctx.reply_to_sender_id.ok_or_else(|| {
+            Error::Other("could not determine the replied message's sender".to_string())
+        })?;
+        (user_id, key)
+    } else {
+        let tokens: Vec<&str> = ctx.text.split_whitespace().collect();
+        let user_tok = tokens.get(1).copied().unwrap_or("");
+        let user_id = match user_tok.trim_start_matches('@').parse::<i64>() {
+            Ok(id) => id,
+            Err(_) => ctx.responder.resolve_user(user_tok).await?.id,
+        };
+        (user_id, promote_scope(&tokens, 2))
     };
-    let _ = user_id;
-    Err(todo_op(
-        "global demote (iter dialogs + EditAdminRequest)",
-        "plugins/globaltools.py:gdemote",
-    ))
+    // Python demotes with all-false rights and the fixed rank "Not AdMin".
+    let mut _count = 0;
+    for dialog in ctx.responder.dialogs().await? {
+        let kind = dialog_kind(ctx, dialog.id).await;
+        let in_scope = match key {
+            "group" => matches!(kind, Some(ChatKind::Group) | Some(ChatKind::Supergroup)),
+            "channel" => matches!(kind, Some(ChatKind::Channel)),
+            _ => matches!(
+                kind,
+                Some(ChatKind::Group) | Some(ChatKind::Supergroup) | Some(ChatKind::Channel)
+            ),
+        };
+        if !in_scope {
+            continue;
+        }
+        if ctx
+            .responder
+            .promote_user(dialog.id, user_id, AdminRights::default(), "Not AdMin")
+            .await
+            .is_ok()
+        {
+            _count += 1;
+        }
+    }
+    Ok(())
 }
 
 async fn gban(ctx: &Ctx) -> Result<()> {
@@ -286,7 +407,7 @@ async fn gban(ctx: &Ctx) -> Result<()> {
             .trim()
             .to_string()
     };
-    let user_id = match target_or_todo(ctx, "plugins/globaltools.py:gban") {
+    let user_id = match target_or_todo(ctx, "plugins/globaltools.py:gban").await {
         Ok(id) => id,
         Err(e) if e.to_string() == "missing_target" => {
             ctx.reply("`Reply to some msg or add their id.`").await?;
@@ -318,7 +439,7 @@ async fn gban(ctx: &Ctx) -> Result<()> {
 
 async fn ungban(ctx: &Ctx) -> Result<()> {
     let _ = ctx.reply("`UnGbanning...`").await?;
-    let user_id = match target_or_todo(ctx, "plugins/globaltools.py:ungban") {
+    let user_id = match target_or_todo(ctx, "plugins/globaltools.py:ungban").await {
         Ok(id) => id,
         Err(e) if e.to_string() == "missing_target" => {
             ctx.reply("`Reply to some msg or add their id.`").await?;
@@ -339,7 +460,7 @@ async fn ungban(ctx: &Ctx) -> Result<()> {
 
 async fn gkick(ctx: &Ctx) -> Result<()> {
     let _ = ctx.reply("`Gkicking...`").await?;
-    let user_id = match target_or_todo(ctx, "plugins/globaltools.py:gkick") {
+    let user_id = match target_or_todo(ctx, "plugins/globaltools.py:gkick").await {
         Ok(id) => id,
         Err(e) if e.to_string() == "missing_target" => {
             ctx.reply("`Reply to some msg or add their id.`").await?;
@@ -355,16 +476,20 @@ async fn gkick(ctx: &Ctx) -> Result<()> {
         ctx.reply("`I can't gkick my Developers.`").await?;
         return Ok(());
     }
-    // TODO(responder-op): iter dialogs + kick_participant.
-    Err(todo_op(
-        "global kick (iter dialogs + kick)",
-        "plugins/globaltools.py:gkick",
-    ))
+    // Python: kick_participant per group/channel dialog, swallowing
+    // per-chat errors.
+    for dialog in ctx.responder.dialogs().await? {
+        if !is_group_or_channel(ctx, dialog.id).await {
+            continue;
+        }
+        let _ = kick_user(ctx, dialog.id, user_id).await;
+    }
+    Ok(())
 }
 
 async fn gmute(ctx: &Ctx) -> Result<()> {
     let _ = ctx.reply("`Gmuting...`").await?;
-    let user_id = match target_or_todo(ctx, "plugins/globaltools.py:gmute") {
+    let user_id = match target_or_todo(ctx, "plugins/globaltools.py:gmute").await {
         Ok(id) => id,
         Err(e) if e.to_string() == "missing_target" => {
             ctx.reply("`Reply to some msg or add their id.`").await?;
@@ -384,16 +509,31 @@ async fn gmute(ctx: &Ctx) -> Result<()> {
         ctx.reply("`User is already gmuted.`").await?;
         return Ok(());
     }
-    // TODO(responder-op): iter dialogs + edit_permissions.
-    Err(todo_op(
-        "global mute (iter dialogs + edit_permissions)",
-        "plugins/globaltools.py:gmute",
-    ))
+    // Python: edit_permissions(send_messages=False) per group dialog,
+    // swallowing per-chat errors, then record the gmute.
+    for dialog in ctx.responder.dialogs().await? {
+        if !matches!(
+            dialog_kind(ctx, dialog.id).await,
+            Some(ChatKind::Group) | Some(ChatKind::Supergroup)
+        ) {
+            continue;
+        }
+        let _ = ctx
+            .responder
+            .ban_user(dialog.id, user_id, mute_rights(None))
+            .await;
+    }
+    let mut muted = gmuted(ctx).await?;
+    if !muted.contains(&user_id) {
+        muted.push(user_id);
+    }
+    set_gmuted(ctx, &muted).await?;
+    Ok(())
 }
 
 async fn ungmute(ctx: &Ctx) -> Result<()> {
     let _ = ctx.reply("`UnGmuting...`").await?;
-    let user_id = match target_or_todo(ctx, "plugins/globaltools.py:ungmute") {
+    let user_id = match target_or_todo(ctx, "plugins/globaltools.py:ungmute").await {
         Ok(id) => id,
         Err(e) if e.to_string() == "missing_target" => {
             ctx.reply("`Reply to some msg or add their id.`").await?;
@@ -405,11 +545,22 @@ async fn ungmute(ctx: &Ctx) -> Result<()> {
         ctx.reply("`User is not gmuted.`").await?;
         return Ok(());
     }
-    // TODO(responder-op): iter dialogs + edit_permissions.
-    Err(todo_op(
-        "global unmute (iter dialogs + edit_permissions)",
-        "plugins/globaltools.py:ungmute",
-    ))
+    // Python: edit_permissions(send_messages=True) per group dialog,
+    // swallowing per-chat errors, then drop the gmute record.
+    // `unban_user` clears the banned rights, which lifts the send ban.
+    for dialog in ctx.responder.dialogs().await? {
+        if !matches!(
+            dialog_kind(ctx, dialog.id).await,
+            Some(ChatKind::Group) | Some(ChatKind::Supergroup)
+        ) {
+            continue;
+        }
+        let _ = ctx.responder.unban_user(dialog.id, user_id).await;
+    }
+    let mut muted = gmuted(ctx).await?;
+    muted.retain(|u| *u != user_id);
+    set_gmuted(ctx, &muted).await?;
+    Ok(())
 }
 
 /// Parse a broadcast's text + button markup (Python `fns.get_msg_button`
@@ -433,35 +584,70 @@ fn broadcast_parts(ctx: &Ctx) -> Option<(String, Option<String>)> {
 async fn gcast(ctx: &Ctx) -> Result<()> {
     // Pattern `g(admin|)cast( (.*)|$)`: group 1 is "admin" or "".
     let admin_only = ctx.captures.get(1).map(|s| s.as_str()) == Some("admin");
-    let _ = admin_only;
-    let Some((_msg, _btn)) = broadcast_parts(ctx) else {
+    let Some((msg, btn)) = broadcast_parts(ctx) else {
         ctx.reply("`Give some text to Globally Broadcast or reply a message..`")
             .await?;
         return Ok(());
     };
     let _ = ctx.reply("`Globally Broadcasting Msg...`").await?;
-    // TODO(responder-op): iter dialogs (groups, minus GBLACKLISTS and
-    // NOSPAM_CHAT; admin-only checks admin_rights) + send_message each.
-    // Python: plugins/globaltools.py:gcast.
-    Err(todo_op(
-        "global broadcast (iter dialogs + send_message)",
-        "plugins/globaltools.py:gcast",
-    ))
+    if admin_only {
+        // Python only broadcasts to chats where the account holds admin
+        // rights / is creator; no trait op reports that, so the
+        // admin-only variant stays un-wired.
+        // TODO(responder-op): iter dialogs (groups, minus GBLACKLISTS and
+        // NOSPAM_CHAT; admin-only checks admin_rights) + send_message each.
+        // Python: plugins/globaltools.py:gcast.
+        return Err(todo_op(
+            "global broadcast (iter dialogs + send_message)",
+            "plugins/globaltools.py:gcast",
+        ));
+    }
+    // Text (+ URL buttons) to every group dialog, minus GBLACKLISTS.
+    // (The NOSPAM_CHAT list is not ported. A broadcast built from a
+    // replied message's media goes out as text only: `Ctx` does not
+    // expose the replied message's media.)
+    let blacklists = gblacklists(ctx).await?;
+    for dialog in ctx.responder.dialogs().await? {
+        if !matches!(
+            dialog_kind(ctx, dialog.id).await,
+            Some(ChatKind::Group) | Some(ChatKind::Supergroup)
+        ) {
+            continue;
+        }
+        if blacklists.contains(&dialog.id) {
+            continue;
+        }
+        let _ = broadcast_send(ctx, dialog.id, &msg, &btn).await;
+    }
+    Ok(())
 }
 
 async fn gucast(ctx: &Ctx) -> Result<()> {
-    let Some((_msg, _btn)) = broadcast_parts(ctx) else {
+    let Some((msg, btn)) = broadcast_parts(ctx) else {
         ctx.reply("`Give some text to Globally Broadcast or reply a message..`")
             .await?;
         return Ok(());
     };
     let _ = ctx.reply("`Globally Broadcasting Msg...`").await?;
-    // TODO(responder-op): iter dialogs (private non-bot users, minus
-    // GBLACKLISTS) + send_message each. Python: plugins/globaltools.py:gucast.
-    Err(todo_op(
-        "global user broadcast (iter dialogs + send_message)",
-        "plugins/globaltools.py:gucast",
-    ))
+    // Text (+ URL buttons) to every private non-bot user dialog, minus
+    // GBLACKLISTS. (A broadcast built from a replied message's media
+    // goes out as text only: `Ctx` does not expose the replied
+    // message's media.)
+    let blacklists = gblacklists(ctx).await?;
+    for dialog in ctx.responder.dialogs().await? {
+        if !matches!(dialog_kind(ctx, dialog.id).await, Some(ChatKind::User)) {
+            continue;
+        }
+        if blacklists.contains(&dialog.id) {
+            continue;
+        }
+        match ctx.responder.user_full(dialog.id).await {
+            Ok(user) if !user.bot => {}
+            _ => continue,
+        }
+        let _ = broadcast_send(ctx, dialog.id, &msg, &btn).await;
+    }
+    Ok(())
 }
 
 async fn list_gban(ctx: &Ctx) -> Result<()> {
@@ -487,14 +673,13 @@ async fn list_gban(ctx: &Ctx) -> Result<()> {
         ctx.config.owner_id
     );
     if text.len() > 4096 {
-        // TODO(responder-op): Python writes gbanned.txt and sends it as a
-        // file; the responder's send_file needs a local path — the file
-        // write itself is real, but delivery needs the binary's file path.
-        // Python: plugins/globaltools.py:list_gengbanned.
-        return Err(todo_op(
-            "send gbanned list as file",
-            "plugins/globaltools.py:list_gengbanned",
-        ));
+        // Python writes gbanned.txt and sends it as a file.
+        let path = std::env::temp_dir().join("gbanned.txt");
+        std::fs::write(&path, &text).map_err(|e| Error::Other(e.to_string()))?;
+        ctx.responder
+            .send_file_to(ctx.chat_id, &path, "GBanned users")
+            .await?;
+        return Ok(());
     }
     ctx.reply(&text).await?;
     Ok(())
@@ -502,7 +687,7 @@ async fn list_gban(ctx: &Ctx) -> Result<()> {
 
 async fn gstat(ctx: &Ctx) -> Result<()> {
     let _ = ctx.reply(&ctx.get_str("com_1")).await?;
-    let user_id = match target_or_todo(ctx, "plugins/globaltools.py:gstat_") {
+    let user_id = match target_or_todo(ctx, "plugins/globaltools.py:gstat_").await {
         Ok(id) => id,
         Err(e) if e.to_string() == "missing_target" => {
             ctx.reply("`Reply to some msg or add their id.`").await?;

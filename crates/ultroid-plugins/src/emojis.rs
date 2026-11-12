@@ -11,13 +11,12 @@
 //! - `.emojiindex [pack_title]` — upload every saved emoji/icon
 //!   document to a **live** bot custom-emoji set.
 //!
-//! The pack-list/fetch/upload calls are raw MTProto requests
-//! (`messages.GetStickerSet`, `messages.GetMyStickers`,
-//! `stickers.CreateStickerSet` / `AddStickerToSet`, `messages.UploadMedia`)
-//! and the replied document's attributes are not exposed through `Ctx`,
-//! so every handler validates its input with the fully ported pure
-//! helpers first and then returns an honest TODO(responder-op) error at
-//! the exact MTProto point. The saved-emoji DB (`EMOJI_SAVED` /
+//! The pack-list/fetch calls are wired to the `Responder` sticker ops
+//! (`my_sticker_sets`, `sticker_set`); the replied document's
+//! attributes are not exposed through `Ctx`, so `.emojisave` still
+//! returns an honest TODO(responder-op) error, and uploading a new bot
+//! custom-emoji set (`stickers.CreateStickerSet`) has no trait op, so
+//! `.emojiindex` does too. The saved-emoji DB (`EMOJI_SAVED` /
 //! `EMOJI_DOC_IDS`) is real JSON in udB. The inline frontier
 //! (`@{assistant} emoji …`) and the pack-page callback are
 //! assistant-crate surface (`in_pattern` / `@callback`), not user-plugin
@@ -245,11 +244,33 @@ fn render_pack_page(idx: u64, page: usize) -> (String, bool, bool) {
 
 async fn emoji_packs_cmd(ctx: &Ctx) -> Result<()> {
     // Python: `messages.GetMyStickersRequest(offset_id=0, limit=100)`.
-    // TODO(responder-op): messages.GetMyStickers (Python: emojis.py:emoji_packs_cmd).
-    let _ = ctx;
-    Err(Error::Other(
-        "listing installed sticker/emoji packs requires a binary Responder op (messages.GetMyStickersRequest) (Python: emojis.py:emoji_packs_cmd)".into(),
-    ))
+    // The trait returns no per-set count (the server does not report
+    // one here), so only title / shortname / kind are listed.
+    let sets = ctx.responder.my_sticker_sets().await?;
+    if sets.is_empty() {
+        ctx.reply("`No sticker / custom-emoji packs installed on this account.`")
+            .await?;
+        return Ok(());
+    }
+    let mut lines = vec![format!(
+        "**Sticker / custom-emoji packs** ({}):",
+        sets.len()
+    )];
+    for set in &sets {
+        let kind = if set.emojis {
+            "custom emoji"
+        } else {
+            "stickers"
+        };
+        lines.push(format!(
+            "• **{}** (`{}`) — {kind}",
+            set.title, set.short_name
+        ));
+    }
+    lines.push(String::new());
+    lines.push("Use `.emojiview <pack-link-or-shortname>` to see a pack's contents.".to_string());
+    ctx.reply(&lines.join("\n")).await?;
+    Ok(())
 }
 
 async fn emoji_view_cmd(ctx: &Ctx) -> Result<()> {
@@ -266,12 +287,28 @@ async fn emoji_view_cmd(ctx: &Ctx) -> Result<()> {
         .await?;
         return Ok(());
     };
-    let _ = short;
     // Python: `messages.GetStickerSetRequest(InputStickerSetShortName)`.
-    // TODO(responder-op): messages.GetStickerSet (Python: emojis.py:emoji_view_cmd).
-    Err(Error::Other(
-        "fetching a sticker set requires a binary Responder op (messages.GetStickerSetRequest) (Python: emojis.py:emoji_view_cmd)".into(),
-    ))
+    // The fetched set is cached so the pack-page renderer (and its
+    // callback) can page through it, exactly as in Python.
+    let set = ctx.responder.sticker_set(&short).await?;
+    let idx = next_pack_idx();
+    pack_cache().lock().unwrap().insert(
+        idx,
+        PackEntry {
+            short: set.short_name.clone(),
+            title: set.title.clone(),
+            is_emoji: set.emojis,
+            docs: Some(
+                set.stickers
+                    .iter()
+                    .map(|s| (s.emoji.clone(), s.document_id))
+                    .collect(),
+            ),
+        },
+    );
+    let (text, _, _) = render_pack_page(idx, 0);
+    ctx.reply(&text).await?;
+    Ok(())
 }
 
 async fn emoji_save_cmd(ctx: &Ctx) -> Result<()> {

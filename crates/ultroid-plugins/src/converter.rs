@@ -11,9 +11,9 @@
 //! - `.thumbset` — set uploaded thumbnail as bot's custom thumbnail.
 //!
 //! Each media command works on a local file path given as an argument and
-//! on replied-to Telegram media once it is on disk. Downloading the
-//! replied media (and resolving a saved-message id in `mediainfo`) is the
-//! single TODO(responder-op) site per command.
+//! on replied-to Telegram media, downloaded via the Responder
+//! (`download_media`; a saved-message id in `mediainfo` is resolved via
+//! `me` + `message_summary`).
 
 use std::path::{Path, PathBuf};
 use tokio::process::Command as ProcCommand;
@@ -90,11 +90,70 @@ pub fn register(registry: &mut Registry) {
 
 // ── shared helpers ────────────────────────────────────────────────────────
 
-/// TODO(responder-op): download replied media to a local file.
-fn todo_download(python_ref: &str) -> Error {
-    Error::Other(format!(
-        "download replied media requires a binary Responder op (Python: {python_ref})"
-    ))
+/// Extension guessed from a file's magic bytes (`None` when unrecognised).
+fn sniff_extension(path: &Path) -> Option<&'static str> {
+    use std::io::Read;
+    let mut buf = [0u8; 12];
+    let n = std::fs::File::open(path)
+        .and_then(|mut f| f.read(&mut buf))
+        .unwrap_or(0);
+    let b = &buf[..n];
+    if b.starts_with(b"%PDF") {
+        Some("pdf")
+    } else if b.starts_with(&[0x89, b'P', b'N', b'G']) {
+        Some("png")
+    } else if b.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        Some("jpg")
+    } else if b.starts_with(b"GIF8") {
+        Some("gif")
+    } else if b.starts_with(b"RIFF") && b.len() >= 12 && &b[8..12] == b"WEBP" {
+        Some("webp")
+    } else if b.starts_with(b"RIFF") {
+        Some("wav")
+    } else if b.len() >= 8 && &b[4..8] == b"ftyp" {
+        Some("mp4")
+    } else if b.starts_with(&[0x1A, 0x45, 0xDF, 0xA3]) {
+        Some("mkv")
+    } else if b.starts_with(b"OggS") {
+        Some("ogg")
+    } else if b.starts_with(b"ID3") || b.starts_with(&[0xFF, 0xFB]) {
+        Some("mp3")
+    } else if b.starts_with(b"PK\x03\x04") {
+        Some("zip")
+    } else {
+        None
+    }
+}
+
+/// Rename `path` in place to carry the extension sniffed from its magic
+/// bytes, when recognised — the extension-based helpers below
+/// (`guess_mime`, ffmpeg output naming) need it.
+fn with_sniffed_ext(path: &Path) -> PathBuf {
+    match sniff_extension(path) {
+        Some(ext) => {
+            let renamed = path.with_extension(ext);
+            if std::fs::rename(path, &renamed).is_ok() {
+                renamed
+            } else {
+                path.to_path_buf()
+            }
+        }
+        None => path.to_path_buf(),
+    }
+}
+
+/// Download the replied message's media via the Responder, with a sniffed
+/// extension (see [`with_sniffed_ext`]).
+async fn download_reply(ctx: &Ctx) -> Result<PathBuf> {
+    let reply_id = ctx
+        .reply_to_id
+        .ok_or_else(|| Error::Other("reply to a message first".into()))?;
+    let dest = tmp_file("input");
+    let path = ctx
+        .responder
+        .download_media(ctx.chat_id, reply_id as i32, &dest)
+        .await?;
+    Ok(with_sniffed_ext(&path))
 }
 
 fn tmp_file(name: &str) -> PathBuf {
@@ -214,11 +273,12 @@ async fn thumbnail(ctx: &Ctx) -> Result<()> {
         Some(p) => p,
         None => {
             if ctx.reply_to_id.is_some() {
-                return Err(todo_download("converter.py:thumbnail"));
+                download_reply(ctx).await?
+            } else {
+                ctx.reply("Thumbnail — Error: Reply to a photo or media with thumb")
+                    .await?;
+                return Ok(());
             }
-            ctx.reply("Thumbnail — Error: Reply to a photo or media with thumb")
-                .await?;
-            return Ok(());
         }
     };
     let msg = ctx.reply("Thumbnail — Status: Uploading...").await?;
@@ -264,10 +324,11 @@ async fn rename_file(ctx: &Ctx) -> Result<()> {
         Some(p) => p,
         None => {
             if ctx.reply_to_id.is_some() {
-                return Err(todo_download("converter.py:rename_file"));
+                download_reply(ctx).await?
+            } else {
+                ctx.reply("Rename — Usage: .rename <new_name>").await?;
+                return Ok(());
             }
-            ctx.reply("Rename — Usage: .rename <new_name>").await?;
-            return Ok(());
         }
     };
     let msg = ctx.reply("Rename — Status: Renaming...").await?;
@@ -321,10 +382,11 @@ async fn uconverter(ctx: &Ctx) -> Result<()> {
         Some(p) => p,
         None => {
             if ctx.reply_to_id.is_some() {
-                return Err(todo_download("converter.py:uconverter"));
+                download_reply(ctx).await?
+            } else {
+                ctx.reply("Convert — Error: Reply to media").await?;
+                return Ok(());
             }
-            ctx.reply("Convert — Error: Reply to media").await?;
-            return Ok(());
         }
     };
     let msg = ctx.reply("Convert — Status: Downloading...").await?;
@@ -391,7 +453,7 @@ async fn open_cmd(ctx: &Ctx) -> Result<()> {
     let path: PathBuf = if !arg.is_empty() && Path::new(arg).is_file() {
         PathBuf::from(arg)
     } else if ctx.reply_to_id.is_some() {
-        return Err(todo_download("converter.py:open_cmd"));
+        download_reply(ctx).await?
     } else {
         ctx.reply("Open — Error: Reply to a file or give a local file path")
             .await?;
@@ -438,17 +500,32 @@ async fn open_cmd(ctx: &Ctx) -> Result<()> {
 async fn mediainfo(ctx: &Ctx) -> Result<()> {
     let arg = ctx.args.trim();
     // A numeric arg is a saved-message id in Python
-    // (`get_messages("me", ids=...)`) — that lookup needs the client.
-    // TODO(responder-op): get_messages by id (Python: converter.py:mediainfo).
-    if !arg.is_empty() && arg.parse::<i64>().is_ok() {
-        return Err(Error::Other(
-            "fetching a saved message by id requires a binary Responder op (Python: converter.py:mediainfo)".into(),
-        ));
-    }
+    // (`get_messages("me", ids=...)`): fetch it from Saved Messages (the
+    // account's own id is its Saved Messages dialog) and download its
+    // media.
     let path: PathBuf = if !arg.is_empty() && Path::new(arg).is_file() {
         PathBuf::from(arg)
+    } else if !arg.is_empty() && arg.parse::<i64>().is_ok() {
+        let msg_id: i64 = arg.parse().unwrap_or(0);
+        let me = ctx.responder.me().await?;
+        let summary = ctx
+            .responder
+            .message_summary(me.id, msg_id as i32)
+            .await?
+            .ok_or_else(|| Error::Other(format!("no saved message with id {msg_id}")))?;
+        if !summary.has_media {
+            ctx.reply("Media Info — Error: That saved message has no media")
+                .await?;
+            return Ok(());
+        }
+        let dest = tmp_file("mediainfo");
+        let downloaded = ctx
+            .responder
+            .download_media(me.id, msg_id as i32, &dest)
+            .await?;
+        with_sniffed_ext(&downloaded)
     } else if ctx.reply_to_id.is_some() {
-        return Err(todo_download("converter.py:mediainfo"));
+        download_reply(ctx).await?
     } else {
         ctx.reply("Media Info — Error: Reply to media or provide file ID")
             .await?;

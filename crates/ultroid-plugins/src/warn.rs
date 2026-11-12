@@ -5,10 +5,10 @@
 //! `SETWARN` holds `"<count> <ban|mute|kick>"` (default `3 kick`).
 //!
 //! Warn counting, reason accumulation and threshold evaluation are fully
-//! ported. The threshold actions (ban / kick / mute RPCs) and every
-//! `get_entity` name lookup are `TODO(responder-op)` sites; mentions fall
-//! back to the `[id](tg://user?id=…)` form where Python would use the
-//! fetched display name.
+//! ported, and the threshold actions (ban / kick / mute RPCs) and target
+//! resolution are wired to the `Responder` ops. Name lookups still fall
+//! back to the `[id](tg://user?id=…)` mention form where Python would use
+//! the fetched display name.
 //!
 //! Patterns are kept exactly as written in Python, including the literal
 //! `dbs.warn.warns` prefix on the `warns` command.
@@ -17,7 +17,7 @@ use crate::util::{def, reg_add};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use ultroid_core::db::{db_get_json, db_set_json};
-use ultroid_core::{CommandDef, Ctx, Error, Registry, Result};
+use ultroid_core::{BannedRights, CommandDef, Ctx, Error, Registry, Result};
 
 pub const HELP: &str = "✘ Commands Available\n\n•`{i}warn <reply to user> <reason>`\n    Gives Warn.\n\n•`{i}resetwarn <reply to user>`\n    To reset All Warns.\n\n•`{i}warns <reply to user>`\n   To Get List of Warnings of a user.\n\n•`{i}setwarn <warn count> | <ban/mute/kick>`\n   Set Number in warn count for warnings\n   After putting \" | \" mark put action like ban/mute/kick\n   Its Default 3 kick\n   Example : `setwarn 5 | mute`\n\n";
 
@@ -46,12 +46,6 @@ pub fn register(registry: &mut Registry) {
     reg_add(registry, def("setwarn", "setwarn( (.*)|$)", HELP), |ctx| {
         Box::pin(set_warn(ctx))
     });
-}
-
-fn todo_op(op: &str, py: &str) -> Error {
-    Error::Other(format!(
-        "{op} requires a binary Responder op (Python: {py})"
-    ))
 }
 
 /// Markdown mention of a user id (Python `fns.inline_mention` with only
@@ -131,12 +125,25 @@ pub fn parse_setwarn(raw: Option<&str>) -> (i64, String) {
     (n, parts[1].to_string())
 }
 
+/// Kick a user: Telethon `kick_participant` is a ban followed by an
+/// immediate unban.
+async fn kick_user(ctx: &Ctx, user_id: i64) -> Result<()> {
+    ctx.responder
+        .ban_user(ctx.chat_id, user_id, BannedRights::all_banned())
+        .await?;
+    ctx.responder.unban_user(ctx.chat_id, user_id).await
+}
+
 /// Resolve the warned user from a reply or an argument (port of the
-/// pattern repeated across `warn.py`): reply -> sender (needs fetch);
-/// `@username` -> needs resolve; numeric id -> ok.
-fn resolve_target(ctx: &Ctx, py_fn: &str) -> Result<i64> {
+/// pattern repeated across `warn.py`): reply -> the replied message's
+/// sender (from `ctx.reply_to_sender_id`); `@username` -> `resolve_user`;
+/// numeric id -> ok.
+async fn resolve_target(ctx: &Ctx, py_fn: &str) -> Result<i64> {
+    let _ = py_fn;
     if ctx.reply_to_id.is_some() {
-        return Err(todo_op("get replied message sender", py_fn));
+        return ctx.reply_to_sender_id.ok_or_else(|| {
+            Error::Other("could not determine the replied message's sender".to_string())
+        });
     }
     let tok = ctx.text.split_whitespace().nth(1).unwrap_or("");
     if tok.is_empty() {
@@ -144,7 +151,7 @@ fn resolve_target(ctx: &Ctx, py_fn: &str) -> Result<i64> {
     }
     match tok.trim_start_matches('@').parse::<i64>() {
         Ok(id) => Ok(id),
-        Err(_) => Err(todo_op("resolve user id/username", py_fn)),
+        Err(_) => Ok(ctx.responder.resolve_user(tok).await?.id),
     }
 }
 
@@ -159,10 +166,10 @@ async fn warn(ctx: &Ctx) -> Result<()> {
         } else {
             ctx.text[5..].trim().to_string()
         };
-        let user_id = resolve_target(ctx, "plugins/warn.py:warn")?;
+        let user_id = resolve_target(ctx, "plugins/warn.py:warn").await?;
         (user_id, reason)
     } else {
-        let user_id = match resolve_target(ctx, "plugins/warn.py:warn") {
+        let user_id = match resolve_target(ctx, "plugins/warn.py:warn").await {
             Ok(id) => id,
             Err(e) if e.to_string() == "missing_target" => {
                 ctx.reply("Reply To A User").await?;
@@ -189,7 +196,7 @@ async fn warn(ctx: &Ctx) -> Result<()> {
     if count + 1 >= threshold {
         add_warn(ctx, ctx.chat_id, user_id, count + 1, &reasons).await?;
         let (final_count, final_reasons) = warns_of(ctx, ctx.chat_id, user_id).await?;
-        let (action_taken, action_err) = match action.as_str() {
+        let (action_taken, _action_err) = match action.as_str() {
             _ if action.contains("ban") => {
                 ("ban", "edit_permissions(chat, user, view_messages=False)")
             }
@@ -198,9 +205,29 @@ async fn warn(ctx: &Ctx) -> Result<()> {
             }
             _ => ("kick", "kick_participant(chat, user)"),
         };
-        let _ = (action_taken, action_err);
-        // TODO(responder-op): ban/kick/mute the user, then report.
-        // Python: plugins/warn.py:warn (threshold branch).
+        // Threshold action, then report (Python: plugins/warn.py:warn).
+        match action_taken {
+            "ban" => {
+                ctx.responder
+                    .ban_user(ctx.chat_id, user_id, BannedRights::all_banned())
+                    .await?;
+            }
+            "mute" => {
+                ctx.responder
+                    .ban_user(
+                        ctx.chat_id,
+                        user_id,
+                        BannedRights {
+                            send_messages: true,
+                            ..Default::default()
+                        },
+                    )
+                    .await?;
+            }
+            _ => {
+                kick_user(ctx, user_id).await?;
+            }
+        }
         let reason_list: Vec<&str> = final_reasons
             .as_deref()
             .unwrap_or("")
@@ -214,12 +241,9 @@ async fn warn(ctx: &Ctx) -> Result<()> {
         for (i, r) in reason_list.iter().enumerate().take(final_count as usize) {
             text.push_str(&format!("•**{}.** {r}\n", i + 1));
         }
-        let _ = text;
         reset_warns(ctx, ctx.chat_id, user_id).await?;
-        return Err(todo_op(
-            &format!("threshold action '{action_taken}' ({action_err})"),
-            "plugins/warn.py:warn",
-        ));
+        ctx.reply(&text).await?;
+        return Ok(());
     }
     add_warn(ctx, ctx.chat_id, user_id, count + 1, &reasons).await?;
     ctx.reply(&format!(
@@ -232,7 +256,7 @@ async fn warn(ctx: &Ctx) -> Result<()> {
 }
 
 async fn reset_warn(ctx: &Ctx) -> Result<()> {
-    let user_id = match resolve_target(ctx, "plugins/warn.py:rwarn") {
+    let user_id = match resolve_target(ctx, "plugins/warn.py:rwarn").await {
         Ok(id) => id,
         Err(e) if e.to_string() == "missing_target" => {
             ctx.reply("Reply To user").await?;
@@ -247,7 +271,7 @@ async fn reset_warn(ctx: &Ctx) -> Result<()> {
 }
 
 async fn list_warns(ctx: &Ctx) -> Result<()> {
-    let user_id = match resolve_target(ctx, "plugins/warn.py:twarns") {
+    let user_id = match resolve_target(ctx, "plugins/warn.py:twarns").await {
         Ok(id) => id,
         Err(e) if e.to_string() == "missing_target" => {
             ctx.reply("Reply To A User").await?;

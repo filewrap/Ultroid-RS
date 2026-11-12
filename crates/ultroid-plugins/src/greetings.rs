@@ -4,17 +4,22 @@
 //! `WELCOME` / `GOODBYE` map chat id -> {welcome|goodbye, media, button};
 //! `THANK_MEMBERS` maps chat id -> true.
 //!
-//! Media handling: setting a note from a replied message's media needs the
-//! reply's media descriptor + a download, which the `Ctx` surface does not
-//! expose — that path returns a `TODO(responder-op)` error (see
-//! `set_note`). The plain-text path is fully ported. Telegraph upload
-//! (`graph.org`) is done over `reqwest` when a local file path is available;
-//! without a download there is nothing to upload.
+//! Media handling: setting a note from a replied message's text is
+//! resolved through `message_summary`; a replied message with media
+//! still needs the reply's media kind + a download, which the trait does
+//! not expose — that path returns a `TODO(responder-op)` error (see
+//! `set_note`). Notes with inline buttons are delivered with
+//! `send_markup_to`; a note with stored media cannot be sent (no trait
+//! op sends a stored media reference). The plain-text path is fully
+//! ported. Telegraph upload (`graph.org`) is done over `reqwest` when a
+//! local file path is available; without a download there is nothing to
+//! upload.
 
 use crate::util::{def, reg_add};
 use serde_json::{Map, Value, json};
 use std::collections::HashMap;
 use ultroid_core::db::{db_get_json, db_set_json};
+use ultroid_core::tg::InlineButton;
 use ultroid_core::{Ctx, Error, Registry, Result};
 
 pub const HELP: &str = "✘ Commands Available -\n\n---- Welcomes ----\n• `{i}setwelcome <message/reply to message>`\n    Set welcome message in the current chat.\n\n• `{i}clearwelcome`\n    Delete the welcome in the current chat.\n\n• `{i}getwelcome`\n    Get the welcome message in the current chat.\n\n---- GoodByes ----\n• `{i}setgoodbye <message/reply to message>`\n    Set goodbye message in the current chat.\n\n• `{i}cleargoodbye`\n    Delete the goodbye in the current chat.\n\n• `{i}getgoodbye`\n    Get the goodbye message in the current chat.\n\n• `{i}thankmembers on/off`\n    Send a thank you sticker on hitting a members count of 100*x in your groups.\n\nNote: `{mention}`, `{group}`, `{count}`, `{name}`, `{fullname}`, `{username}`, `{userid}` can be used as formatting parameters.\n";
@@ -263,6 +268,20 @@ pub async fn upload_to_telegraph(ctx: &Ctx, path: &std::path::Path) -> Result<St
     Ok(format!("https://telegra.ph{first}"))
 }
 
+/// Parse stored greeting button JSON — `split_msg_button` stores a
+/// nested `[[[label, url], …], …]` row list — into markup rows, for
+/// `Responder::send_markup_to`.
+fn buttons_from_json(button_json: &str) -> Vec<Vec<InlineButton>> {
+    let rows: Vec<Vec<(String, String)>> = serde_json::from_str(button_json).unwrap_or_default();
+    rows.into_iter()
+        .map(|row| {
+            row.into_iter()
+                .map(|(label, url)| InlineButton::url(label, url))
+                .collect()
+        })
+        .collect()
+}
+
 fn todo_op(op: &str, py: &str) -> Error {
     Error::Other(format!(
         "{op} requires a binary Responder op (Python: {py})"
@@ -283,14 +302,47 @@ async fn set_note(
         .nth(1)
         .map(str::trim)
         .filter(|s| !s.is_empty());
-    if ctx.reply_to_id.is_some() {
-        // TODO(responder-op): reply media/text resolution — reading the
-        // replied message (its text, buttons and media kind) needs a
-        // fetch-message op. Python: greetings.py:setwel / setgb.
-        return Err(todo_op(
-            "get replied message (text/buttons/media)",
-            "plugins/greetings.py:setwel",
-        ));
+    if let Some(reply_id) = ctx.reply_to_id {
+        // Resolve the replied message through `message_summary`. A text
+        // reply is stored like an inline-text note; a media reply still
+        // needs the media-kind branch (download + Telegraph upload for
+        // pics/gifs/videos, bot file id otherwise), which no trait op
+        // provides, so it stays an honest error. Python:
+        // greetings.py:setwel / setgb.
+        let Some(summary) = ctx
+            .responder
+            .message_summary(ctx.chat_id, reply_id as i32)
+            .await?
+        else {
+            return Err(Error::Other(
+                "the replied message is no longer available".into(),
+            ));
+        };
+        if summary.has_media {
+            return Err(todo_op(
+                "get replied message media (download + Telegraph upload / bot file id)",
+                "plugins/greetings.py:setwel",
+            ));
+        }
+        if summary.text.is_empty() {
+            ctx.reply(&ctx.get_str(empty_msg_key)).await?;
+            return Ok(());
+        }
+        let (txt, btn) = split_msg_button(&summary.text);
+        put_note(
+            ctx,
+            key,
+            text_key,
+            ctx.chat_id,
+            GreetingNote {
+                text: Some(txt),
+                media: None,
+                button: btn,
+            },
+        )
+        .await?;
+        ctx.reply(saved_msg).await?;
+        return Ok(());
     }
     match text_arg {
         Some(text) => {
@@ -350,14 +402,27 @@ async fn get_welcome(ctx: &Ctx) -> Result<()> {
         ctx.reply(&ctx.get_str("grt_4")).await?;
         return Ok(());
     };
-    if note.button.is_some() {
-        // TODO(responder-op): sending a note with inline buttons needs the
-        // assistant-bot button delivery (`something()` in _inline.py).
-        // Python: greetings.py:listwel.
-        return Err(todo_op(
-            "send note with inline buttons via assistant bot",
-            "plugins/greetings.py:listwel",
-        ));
+    if let Some(button_json) = note.button.as_deref() {
+        // Note with inline buttons — delivered directly with
+        // `send_markup_to` (Python goes through the assistant inline flow
+        // `something()`; the visible result is the same). The stored
+        // media, if any, cannot be attached — no trait op sends a stored
+        // media reference — so a media note still errors below.
+        if note.media.is_some() {
+            return Err(todo_op(
+                "send note with stored media",
+                "plugins/greetings.py:listwel",
+            ));
+        }
+        let text = format!(
+            "**Welcome Note in this chat**\n\n`{}`",
+            note.text.clone().unwrap_or_default()
+        );
+        let rows = buttons_from_json(button_json);
+        ctx.responder
+            .send_markup_to(ctx.chat_id, &text, rows)
+            .await?;
+        return Ok(());
     }
     let text = format!(
         "**Welcome Note in this chat**\n\n`{}`",
@@ -372,13 +437,23 @@ async fn get_goodbye(ctx: &Ctx) -> Result<()> {
         ctx.reply(&ctx.get_str("grt_6")).await?;
         return Ok(());
     };
-    if note.button.is_some() {
-        // TODO(responder-op): same button-delivery gap as getwelcome.
-        // Python: greetings.py:listgd.
-        return Err(todo_op(
-            "send note with inline buttons via assistant bot",
-            "plugins/greetings.py:listgd",
-        ));
+    if let Some(button_json) = note.button.as_deref() {
+        // Same button-delivery path as getwelcome.
+        if note.media.is_some() {
+            return Err(todo_op(
+                "send note with stored media",
+                "plugins/greetings.py:listgd",
+            ));
+        }
+        let text = format!(
+            "**Goodbye Note in this chat**\n\n`{}`",
+            note.text.clone().unwrap_or_default()
+        );
+        let rows = buttons_from_json(button_json);
+        ctx.responder
+            .send_markup_to(ctx.chat_id, &text, rows)
+            .await?;
+        return Ok(());
     }
     let text = format!(
         "**Goodbye Note in this chat**\n\n`{}`",

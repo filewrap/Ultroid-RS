@@ -11,12 +11,13 @@
 //! `get_entity` fails). The cron scheduler (Python `apscheduler`) has no
 //! Rust equivalent in this crate — the close/open jobs are ported as
 //! callable async functions (`close_groups` / `open_groups`) for the
-//! binary's scheduler to run, with the `EditChatDefaultBannedRights`
-//! RPCs as `TODO(responder-op)` sites.
+//! binary's scheduler to run, wired to `edit_default_rights` +
+//! `send_to`. Resolving a `@username` chat argument in `.addnm` /
+//! `.remnm` still has no trait op and stays a `TODO(responder-op)` site.
 
 use crate::util::{def, reg_add};
 use ultroid_core::db::{db_get_json, db_set_json};
-use ultroid_core::{Ctx, Error, Registry, Result};
+use ultroid_core::{BannedRights, Ctx, Error, Registry, Result};
 
 pub const HELP: &str = "✘ Commands Available -\n\nAt Night it will turn off everyone permission to send message in  an all groups which you added via `{i}addnight`\nAnd Turn On auto at morning\n\n• `{i}addnm`\n   Add NightMode\n   To Add Group To Auto Night Mode.\n\n• `{i}remnm`\n   Remove NightMode\n   To remove Group From Auto Night Mode\n\n• `{i}listnm`\n   List NightMode\n   To Get All List of Groups where NightMode Active.\n\n• `{i}nmtime <close hour> <close min> <open hour> <open min>`\n   NightMode Time\n   By Default Its close 00:00 , open 07:00\n   Use 24hr format\n   Ex- `nmtime 01 00 06 30`\n";
 
@@ -167,27 +168,52 @@ async fn list_groups(ctx: &Ctx) -> Result<()> {
 
 /// Close every night-mode group (Python `close_grp`): ban `send_messages`
 /// for everyone, then announce the open time (from `NIGHT_TIME`).
+/// Per-chat failures are swallowed, exactly like Python's per-chat
+/// `try/except: LOGS.info(er)`.
 pub async fn close_groups(ctx: &Ctx) -> Result<()> {
     let (_, _, open_h, open_m) = night_time(ctx).await?;
     let chats = night_chats(ctx).await?;
-    let _ = (open_h, open_m, chats);
-    // TODO(responder-op): EditChatDefaultBannedRightsRequest(chat,
-    // send_messages=True) + send_message per chat.
-    // Python: plugins/nightmode.py:close_grp.
-    Err(Error::Other(
-        "close night-mode groups requires a binary Responder op (Python: plugins/nightmode.py:close_grp)".into(),
-    ))
+    for chat in chats {
+        let rights = BannedRights {
+            send_messages: true,
+            ..Default::default()
+        };
+        if ctx
+            .responder
+            .edit_default_rights(chat, rights)
+            .await
+            .is_ok()
+        {
+            let _ = ctx
+                .responder
+                .send_to(
+                    chat,
+                    &format!(
+                        "**NightMode : Group Closed**\n\nGroup Will Open At `{open_h}:{open_m}`"
+                    ),
+                )
+                .await;
+        }
+    }
+    Ok(())
 }
 
 /// Open every night-mode group again (Python `open_grp`): lift the
 /// default bans, then announce.
 pub async fn open_groups(ctx: &Ctx) -> Result<()> {
     let chats = night_chats(ctx).await?;
-    let _ = chats;
-    // TODO(responder-op): EditChatDefaultBannedRightsRequest(chat,
-    // all send_* = False) + send_message per chat.
-    // Python: plugins/nightmode.py:open_grp.
-    Err(Error::Other(
-        "open night-mode groups requires a binary Responder op (Python: plugins/nightmode.py:open_grp)".into(),
-    ))
+    for chat in chats {
+        if ctx
+            .responder
+            .edit_default_rights(chat, BannedRights::default())
+            .await
+            .is_ok()
+        {
+            let _ = ctx
+                .responder
+                .send_to(chat, "**NightMode Off**\n\nGroup Opened 🥳.")
+                .await;
+        }
+    }
+    Ok(())
 }

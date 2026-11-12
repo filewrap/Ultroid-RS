@@ -499,10 +499,9 @@ pub async fn get_reply(
 /// Resolve the target user for add/remove commands.
 ///
 /// Python resolves a replied-to sender, or parses an id/username from
-/// the args. The command context carries no replied-message sender, so a
-/// reply target needs entity resolution the Responder surface cannot do;
-/// a numeric id in the args resolves directly.
-fn resolve_target_id(ctx: &Ctx) -> Result<i64> {
+/// the args. A reply target comes from `ctx.reply_to_sender_id`; a
+/// `@username` arg resolves through the `Responder`.
+async fn resolve_target_id(ctx: &Ctx) -> Result<i64> {
     let arg = ctx.args.trim();
     if !arg.is_empty() {
         let first = arg.split_whitespace().next().unwrap_or("");
@@ -510,24 +509,18 @@ fn resolve_target_id(ctx: &Ctx) -> Result<i64> {
         if let Ok(id) = cleaned.parse::<i64>() {
             return Ok(id);
         }
-        // TODO(responder-op): resolve @username to a user id
-        // (Python: chatbot.py:_manage_ai_user via event.client.parse_id).
-        return Err(Error::Other(
-            "resolving a @username to a user id requires a binary Responder op (Python: plugins/chatbot.py:_manage_ai_user)".to_string(),
-        ));
+        return Ok(ctx.responder.resolve_user(cleaned).await?.id);
     }
     if ctx.reply_to_id.is_some() {
-        // TODO(responder-op): resolve the replied message's sender
-        // (Python: chatbot.py:_manage_ai_user via event.get_reply_message()).
-        return Err(Error::Other(
-            "resolving the replied message's sender requires a binary Responder op (Python: plugins/chatbot.py:_manage_ai_user)".to_string(),
-        ));
+        if let Some(sender_id) = ctx.reply_to_sender_id {
+            return Ok(sender_id);
+        }
     }
     Err(Error::Other(ctx.get_str("chab_1")))
 }
 
 async fn manage_ai_user(ctx: &Ctx, db_key: &str, label: &str, add: bool) -> Result<()> {
-    let user_id = resolve_target_id(ctx)?;
+    let user_id = resolve_target_id(ctx).await?;
     let mut key = user_map(ctx, db_key).await;
     let chat = ctx.chat_id.to_string();
     if add {

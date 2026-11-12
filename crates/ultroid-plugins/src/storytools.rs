@@ -6,13 +6,13 @@
 //!
 //! Argument parsing (shlex-style tokeniser, period/privacy validation)
 //! is real and faithful. Posting / deleting a story and enabling stealth
-//! mode are `stories.*` RPCs plus a media download — none on the
-//! `Responder` surface yet, so each handler validates first and returns
-//! an honest `TODO(responder-op)` error at the exact point the Telegram
-//! op is needed.
+//! mode are wired to the `Responder` story ops. Note the trait's
+//! `post_story` only supports a public story from the replied message's
+//! media — the parsed `-p` period, `-priv` privacy and `-pin` flags
+//! have no trait op and are not honoured yet.
 
 use crate::util::{def, reg_add};
-use ultroid_core::{Ctx, Error, Registry, Result};
+use ultroid_core::{Ctx, Registry, Result};
 
 pub const PERIOD_CHOICES: [u32; 4] = [6, 12, 24, 48];
 pub const PRIVACY_CHOICES: [&str; 4] = ["everyone", "contacts", "close_friends", "nobody"];
@@ -148,14 +148,27 @@ async fn send_story(ctx: &Ctx) -> Result<()> {
             .await?;
         return Ok(());
     }
-    let _id = ctx.reply(&ctx.get_str("com_1")).await?;
-    // TODO(responder-op): download the replied media and post it as a
-    // story (stories.SendStoryRequest: caption, period, privacy, pinned)
-    // (Python: storytools.py:_send_story, via `pyUltroid._core.stories.send_story`).
-    let _ = args;
-    Err(Error::Other(
-        "send story requires a binary Responder op (Python: storytools.py:_send_story)".to_string(),
-    ))
+    let id = ctx.reply(&ctx.get_str("com_1")).await?;
+    let Some(reply_id) = ctx.reply_to_id else {
+        // The trait posts the *replied* message's media, so a reply is
+        // required even when the command message itself carries text.
+        ctx.reply("`Reply to a media message to post it as a story.`")
+            .await?;
+        return Ok(());
+    };
+    // stories.SendStoryRequest (Python: storytools.py:_send_story, via
+    // `pyUltroid._core.stories.send_story`). The trait posts a public
+    // story; the parsed period / privacy / pinned flags (see the module
+    // docs) have no trait op.
+    let StoryArgs { caption, .. } = args;
+    ctx.responder
+        .post_story(
+            ctx.chat_id,
+            reply_id as i32,
+            caption.as_deref().unwrap_or(""),
+        )
+        .await?;
+    ctx.edit(id, "`Story posted.`").await
 }
 
 async fn delete_story(ctx: &Ctx) -> Result<()> {
@@ -164,9 +177,9 @@ async fn delete_story(ctx: &Ctx) -> Result<()> {
         ctx.reply("`Give the story id(s) to delete.`").await?;
         return Ok(());
     }
-    let mut ids: Vec<i64> = Vec::new();
+    let mut ids: Vec<i32> = Vec::new();
     for tok in raw.split_whitespace() {
-        match tok.parse::<i64>() {
+        match tok.parse::<i32>() {
             Ok(n) => ids.push(n),
             Err(_) => {
                 ctx.reply(&format!("`Invalid story id: {tok}`")).await?;
@@ -174,23 +187,18 @@ async fn delete_story(ctx: &Ctx) -> Result<()> {
             }
         }
     }
-    let _id = ctx.reply(&ctx.get_str("com_1")).await?;
-    // TODO(responder-op): stories.DeleteStoriesRequest(ids)
-    // (Python: storytools.py:_delete_story).
-    let _ = ids;
-    Err(Error::Other(
-        "delete stories requires a binary Responder op (Python: storytools.py:_delete_story)"
-            .to_string(),
-    ))
+    let id = ctx.reply(&ctx.get_str("com_1")).await?;
+    // stories.DeleteStoriesRequest (Python: storytools.py:_delete_story).
+    let count = ids.len();
+    ctx.responder.delete_stories(ids).await?;
+    ctx.edit(id, &format!("`Deleted {count} stor(ies).`")).await
 }
 
 async fn stealth_mode(ctx: &Ctx) -> Result<()> {
-    let _id = ctx.reply(&ctx.get_str("com_1")).await?;
-    // TODO(responder-op): stories.ToggleStealthMode / send_stealth_mode
+    let id = ctx.reply(&ctx.get_str("com_1")).await?;
+    // stories.ToggleStealthMode / send_stealth_mode
     // (Python: storytools.py:_stealth_mode, via
     // `pyUltroid._core.stories.send_stealth_mode`).
-    Err(Error::Other(
-        "enable stealth mode requires a binary Responder op (Python: storytools.py:_stealth_mode)"
-            .to_string(),
-    ))
+    ctx.responder.set_story_stealth(true).await?;
+    ctx.edit(id, "`Stealth mode activated.`").await
 }

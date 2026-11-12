@@ -8,8 +8,7 @@
 //! - `.gif <query>` — send video regarding a query (via the `gif` inline bot).
 //!
 //! Each media command works on a local file path given as an argument and
-//! on replied-to Telegram media once it is on disk. Downloading the
-//! replied media is the single TODO(responder-op) site per command.
+//! on replied-to Telegram media, downloaded via `Responder::download_media`.
 
 use std::path::{Path, PathBuf};
 use tokio::process::Command as ProcCommand;
@@ -59,13 +58,6 @@ pub fn register(registry: &mut Registry) {
 
 // ── shared helpers ────────────────────────────────────────────────────────
 
-/// TODO(responder-op): download replied media to a local file.
-fn todo_download(python_ref: &str) -> Error {
-    Error::Other(format!(
-        "download replied media requires a binary Responder op (Python: {python_ref})"
-    ))
-}
-
 /// First whitespace token of the args that names an existing local file.
 fn local_input(ctx: &Ctx) -> Option<PathBuf> {
     ctx.args
@@ -75,12 +67,17 @@ fn local_input(ctx: &Ctx) -> Option<PathBuf> {
         .filter(|p| p.is_file())
 }
 
-async fn resolve_input(ctx: &Ctx, python_ref: &str) -> Result<Option<PathBuf>> {
+async fn resolve_input(ctx: &Ctx) -> Result<Option<PathBuf>> {
     if let Some(p) = local_input(ctx) {
         return Ok(Some(p));
     }
-    if ctx.reply_to_id.is_some() {
-        return Err(todo_download(python_ref));
+    if let Some(reply_id) = ctx.reply_to_id {
+        let dest = tmp_file("input");
+        let path = ctx
+            .responder
+            .download_media(ctx.chat_id, reply_id as i32, &dest)
+            .await?;
+        return Ok(Some(path));
     }
     Ok(None)
 }
@@ -119,7 +116,7 @@ async fn igif(ctx: &Ctx) -> Result<()> {
         .get(1)
         .cloned()
         .unwrap_or_else(|| "bw".to_string());
-    let Some(input) = resolve_input(ctx, "giftools.py:igif").await? else {
+    let Some(input) = resolve_input(ctx).await? else {
         ctx.reply("`Reply To gif only`").await?;
         return Ok(());
     };
@@ -152,7 +149,7 @@ async fn igif(ctx: &Ctx) -> Result<()> {
 }
 
 async fn reverse_gif(ctx: &Ctx) -> Result<()> {
-    let Some(input) = resolve_input(ctx, "giftools.py:reverse_gif").await? else {
+    let Some(input) = resolve_input(ctx).await? else {
         ctx.reply("`Reply To Video only`").await?;
         return Ok(());
     };
@@ -177,23 +174,32 @@ async fn reverse_gif(ctx: &Ctx) -> Result<()> {
 
 async fn gifs(ctx: &Ctx) -> Result<()> {
     // Python: `ult.client.inline_query("gif", query)` then clicks a random
-    // result (or `n` results when the query ends with `;<n>`). Inline
-    // queries/clicks need the Telegram client.
-    // TODO(responder-op): inline_query("gif") + click result
-    // (Python: giftools.py:gifs).
+    // result (or `n` results when the query ends with `;<n>`). The trait
+    // clicks only the first result, so a `;<n>` suffix is stripped and a
+    // single (first) result is clicked.
     let query = ctx.args.trim();
     if query.is_empty() {
         ctx.reply("`.gif <query>`").await?;
         return Ok(());
     }
-    Err(Error::Other(
-        "inline query to the 'gif' bot requires a binary Responder op (Python: giftools.py:gifs)"
-            .into(),
-    ))
+    let query = match query.rsplit_once(';') {
+        Some((q, n)) if !q.trim().is_empty() && n.trim().parse::<usize>().is_ok() => q.trim(),
+        _ => query,
+    };
+    let gif = ctx.responder.resolve_user("gif").await?;
+    ctx.responder
+        .inline_query_click(
+            gif.id,
+            query,
+            ctx.chat_id,
+            ctx.reply_to_id.map(|id| id as i32),
+        )
+        .await?;
+    Ok(())
 }
 
 async fn vtogif(ctx: &Ctx) -> Result<()> {
-    let Some(input) = resolve_input(ctx, "giftools.py:vtogif").await? else {
+    let Some(input) = resolve_input(ctx).await? else {
         ctx.reply("`Reply To video only`").await?;
         return Ok(());
     };

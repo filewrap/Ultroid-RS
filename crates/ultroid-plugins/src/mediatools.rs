@@ -10,9 +10,9 @@
 //!   video/photo/media (video: angle must be a multiple of 90).
 //!
 //! A local file path or an `https://` URL may be passed as the argument;
-//! replied-to Telegram media works once it is on disk. Downloading the
-//! replied media (and resolving an album, `-a`) is the TODO(responder-op)
-//! site.
+//! replied-to Telegram media is downloaded via the Responder
+//! (`download_media`). Resolving an album (`-a`) still needs a message
+//! lookup the Responder does not offer (see the TODO in `mediainfo`).
 
 use std::path::{Path, PathBuf};
 use tokio::process::Command as ProcCommand;
@@ -44,11 +44,68 @@ pub fn register(registry: &mut Registry) {
 
 // ── shared helpers ────────────────────────────────────────────────────────
 
-/// TODO(responder-op): download replied media to a local file.
-fn todo_download(python_ref: &str) -> Error {
-    Error::Other(format!(
-        "download replied media requires a binary Responder op (Python: {python_ref})"
-    ))
+/// Extension guessed from a file's magic bytes (`None` when unrecognised).
+fn sniff_extension(path: &Path) -> Option<&'static str> {
+    use std::io::Read;
+    let mut buf = [0u8; 12];
+    let n = std::fs::File::open(path)
+        .and_then(|mut f| f.read(&mut buf))
+        .unwrap_or(0);
+    let b = &buf[..n];
+    if b.starts_with(b"%PDF") {
+        Some("pdf")
+    } else if b.starts_with(&[0x89, b'P', b'N', b'G']) {
+        Some("png")
+    } else if b.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        Some("jpg")
+    } else if b.starts_with(b"GIF8") {
+        Some("gif")
+    } else if b.starts_with(b"RIFF") && b.len() >= 12 && &b[8..12] == b"WEBP" {
+        Some("webp")
+    } else if b.starts_with(b"RIFF") {
+        Some("wav")
+    } else if b.len() >= 8 && &b[4..8] == b"ftyp" {
+        Some("mp4")
+    } else if b.starts_with(&[0x1A, 0x45, 0xDF, 0xA3]) {
+        Some("mkv")
+    } else if b.starts_with(b"OggS") {
+        Some("ogg")
+    } else if b.starts_with(b"ID3") || b.starts_with(&[0xFF, 0xFB]) {
+        Some("mp3")
+    } else {
+        None
+    }
+}
+
+/// Rename `path` in place to carry the extension sniffed from its magic
+/// bytes, when recognised — the extension-based type detection below
+/// (`detect_type_from_path`) needs it.
+fn with_sniffed_ext(path: &Path) -> PathBuf {
+    match sniff_extension(path) {
+        Some(ext) => {
+            let renamed = path.with_extension(ext);
+            if std::fs::rename(path, &renamed).is_ok() {
+                renamed
+            } else {
+                path.to_path_buf()
+            }
+        }
+        None => path.to_path_buf(),
+    }
+}
+
+/// Download the replied message's media via the Responder, with a sniffed
+/// extension (see [`with_sniffed_ext`]).
+async fn download_reply(ctx: &Ctx, stem: &str) -> Result<PathBuf> {
+    let reply_id = ctx
+        .reply_to_id
+        .ok_or_else(|| Error::Other("reply to a message first".into()))?;
+    let dest = tmp_file(stem);
+    let path = ctx
+        .responder
+        .download_media(ctx.chat_id, reply_id as i32, &dest)
+        .await?;
+    Ok(with_sniffed_ext(&path))
 }
 
 fn tmp_file(name: &str) -> PathBuf {
@@ -634,7 +691,11 @@ async fn mediainfo(ctx: &Ctx) -> Result<()> {
                 }
             }
         } else if ctx.reply_to_id.is_some() {
-            return Err(todo_download("mediatools.py:mi"));
+            let p = download_reply(ctx, "media").await?;
+            let t = detect_type_from_path(&p.to_string_lossy())
+                .unwrap_or("file")
+                .to_string();
+            (p, true, t)
         } else {
             ctx.reply("Reply to media or give a file path / URL")
                 .await?;
@@ -710,7 +771,6 @@ async fn rotate(ctx: &Ctx) -> Result<()> {
         }
     };
     // The replied media (video file or photo) must be downloaded first.
-    // TODO(responder-op): download replied media (Python: mediatools.py:rotate_).
     let input = match ctx
         .args
         .split_whitespace()
@@ -719,9 +779,7 @@ async fn rotate(ctx: &Ctx) -> Result<()> {
         .find(|p| p.is_file())
     {
         Some(p) => p,
-        None => {
-            return Err(todo_download("mediatools.py:rotate_"));
-        }
+        None => download_reply(ctx, "rotate").await?,
     };
     let msg = ctx.reply("Processing...").await?;
     let is_video = matches!(

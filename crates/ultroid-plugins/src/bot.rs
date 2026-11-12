@@ -139,23 +139,23 @@ async fn alive_pic(ctx: &Ctx) -> Option<String> {
     Some(raw)
 }
 
-fn todo_op(op: &str, pyref: &str) -> Error {
-    Error::Other(format!(
-        "{op} requires a binary Responder op (Python: {pyref})"
-    ))
-}
-
 /// `.alive` / `.alive inline` — port of `bot.py::lol`.
 async fn alive(ctx: &Ctx) -> Result<()> {
     let placeholder = ctx.reply("⚡").await?;
     let arg = ctx.args.trim();
     if arg == "inline" || arg == "i" {
-        // TODO(responder-op): assistant-bot inline query + click the result
+        // Python: inline-query the assistant bot for "alive" and click
+        // the result (bot.py:lol).
         let _ = ctx.delete(placeholder).await;
-        return Err(todo_op(
-            "assistant inline query for 'alive' + click result",
-            "bot.py:lol",
-        ));
+        let Some(asst_id) = ctx.asst_dialog_id else {
+            return Err(Error::Other(
+                "`.alive inline` requires the assistant bot to be connected".into(),
+            ));
+        };
+        ctx.responder
+            .inline_query_click(asst_id, "alive", ctx.chat_id, None)
+            .await?;
+        return Ok(());
     }
 
     let pic = alive_pic(ctx).await;

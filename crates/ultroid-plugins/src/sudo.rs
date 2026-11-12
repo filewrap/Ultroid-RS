@@ -4,9 +4,8 @@
 //! `SUDO` (`"True"` when sudo mode is on).
 //!
 //! User resolution: a numeric id / the current private chat resolve
-//! locally; a `@username` or a replied message's sender needs a client
-//! entity lookup, which the `Ctx` surface does not expose — those paths
-//! return the honest `TODO(responder-op)` error instead of guessing.
+//! locally; a `@username` resolves via `resolve_user` and a replied
+//! message's sender comes from `ctx.reply_to_sender_id`.
 
 use crate::util::{def, reg_add};
 use serde_json::Value;
@@ -43,12 +42,6 @@ pub fn register(registry: &mut Registry) {
     });
 }
 
-fn todo_op(op: &str, py: &str) -> Error {
-    Error::Other(format!(
-        "{op} requires a binary Responder op (Python: {py})"
-    ))
-}
-
 /// Markdown mention of a user id (Python `fns.inline_mention` when only
 /// the id is known — no display name is available without a client fetch).
 pub fn mention_id(user_id: i64) -> String {
@@ -70,28 +63,22 @@ async fn set_sudoers(ctx: &Ctx, list: &[i64]) -> Result<()> {
 
 /// Resolve the target user for `.addsudo` / `.delsudo` (port of Python
 /// `fns`-style resolution in `sudo.py`):
-/// reply -> replied sender (needs fetch); numeric arg -> id;
-/// `@username` -> needs resolve; private chat -> the chat itself.
-fn resolve_target(ctx: &Ctx) -> Result<i64> {
+/// reply -> the replied message's sender (from `ctx.reply_to_sender_id`);
+/// numeric arg -> id; `@username` -> `resolve_user`; private chat -> the
+/// chat itself.
+async fn resolve_target(ctx: &Ctx) -> Result<i64> {
     let inputs = ctx.args.trim();
     if ctx.reply_to_id.is_some() {
-        // TODO(responder-op): get replied message -> sender id.
-        // Python: plugins/sudo.py (addsudo/delsudo).
-        return Err(todo_op(
-            "get replied message sender",
-            "plugins/sudo.py:addsudo",
-        ));
+        return ctx.reply_to_sender_id.ok_or_else(|| {
+            Error::Other("could not determine the replied message's sender".to_string())
+        });
     }
     if !inputs.is_empty() {
         let first = inputs.split_whitespace().next().unwrap_or("");
         if let Ok(id) = first.trim_start_matches('@').parse::<i64>() {
             return Ok(id);
         }
-        // TODO(responder-op): resolve @username / text id via client.
-        return Err(todo_op(
-            "resolve user id/username",
-            "plugins/sudo.py:addsudo",
-        ));
+        return Ok(ctx.responder.resolve_user(first).await?.id);
     }
     if ctx.chat_type == ChatType::Private {
         return Ok(ctx.chat_id);
@@ -100,7 +87,7 @@ fn resolve_target(ctx: &Ctx) -> Result<i64> {
 }
 
 async fn add_sudo(ctx: &Ctx) -> Result<()> {
-    let id = resolve_target(ctx)?;
+    let id = resolve_target(ctx).await?;
     // Bot/verified check needs the user entity — unresolvable here; the
     // numeric path has no entity to check (Python checks only after fetch).
     let name = mention_id(id);
@@ -124,7 +111,7 @@ async fn add_sudo(ctx: &Ctx) -> Result<()> {
 }
 
 async fn del_sudo(ctx: &Ctx) -> Result<()> {
-    let id = resolve_target(ctx)?;
+    let id = resolve_target(ctx).await?;
     let name = mention_id(id);
     let mut list = sudoers(ctx).await?;
     if !list.contains(&id) {

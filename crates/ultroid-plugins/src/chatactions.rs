@@ -12,6 +12,7 @@
 use crate::util::{def, reg_add};
 use std::collections::HashMap;
 use ultroid_core::db::{db_get_json, db_set_json};
+use ultroid_core::tg::InlineButton;
 use ultroid_core::{CommandDef, Ctx, Error, Registry, Result};
 
 pub const HELP: &str = "Manage per-group event notifications (welcome/goodbye/kick/leave).\n\n• `.actions` — open the settings menu\n• `.actions disable` — disable all notifications\n• `.actions <event> on|off` — toggle (welcome/goodbye/kick/leave)";
@@ -272,6 +273,41 @@ pub async fn handle_chat_action(
     Ok(())
 }
 
+/// Parse `[label | url]` button JSON (from `split_msg_button`) into
+/// inline URL buttons. `None` when the JSON does not parse.
+fn parse_buttons(btn_json: &str) -> Option<Vec<Vec<InlineButton>>> {
+    let rows: Vec<Vec<(String, String)>> = serde_json::from_str(btn_json).ok()?;
+    Some(
+        rows.into_iter()
+            .map(|row| {
+                row.into_iter()
+                    .map(|(label, url)| InlineButton::url(label, url))
+                    .collect()
+            })
+            .collect(),
+    )
+}
+
+/// Send rendered text, with inline buttons when the note carries them.
+/// Python routes button notes through the assistant bot's inline query
+/// (`something()` in `_inline.py`); the trait has no STUFF-registry
+/// inline path, so this delivers the same message + URL buttons
+/// directly via `send_markup_to`, falling back to a plain reply when
+/// the stored button JSON does not parse.
+async fn send_rendered(ctx: &Ctx, rendered: &str, button: &Option<String>) -> Result<()> {
+    match button.as_deref().and_then(parse_buttons) {
+        Some(buttons) => {
+            ctx.responder
+                .send_markup_to(ctx.chat_id, rendered, buttons)
+                .await?;
+        }
+        None => {
+            ctx.reply(rendered).await?;
+        }
+    }
+    Ok(())
+}
+
 async fn deliver_welcome(
     ctx: &Ctx,
     user_mention: &str,
@@ -286,11 +322,22 @@ async fn deliver_welcome(
         return Ok(());
     };
     if note.button.is_some() {
-        // TODO(responder-op): button notes go through `something()` (inline
-        // via the assistant bot). Python: _chatactions.py:_deliver_welcome.
-        return Err(Error::Other(
-            "send welcome with inline buttons via assistant bot requires a binary Responder op (Python: plugins/_chatactions.py:_deliver_welcome)".into(),
-        ));
+        if let Some(text) = &note.text {
+            let rendered = crate::greetings::render_welcome(
+                text,
+                user_mention,
+                user_name,
+                user_fullname,
+                username,
+                user_id,
+                chat_title,
+                member_count,
+            );
+            send_rendered(ctx, &rendered, &note.button).await?;
+            return Ok(());
+        }
+        // Button note with no text falls through to the media branch
+        // below (Python sends media + buttons together via `something()`).
     }
     if let Some(media) = &note.media {
         let _ = media;
@@ -330,10 +377,22 @@ async fn deliver_farewell(
         return Ok(());
     };
     if note.button.is_some() {
-        // TODO(responder-op): same button-delivery gap as welcome.
-        return Err(Error::Other(
-            "send goodbye with inline buttons via assistant bot requires a binary Responder op (Python: plugins/_chatactions.py:_deliver_farewell)".into(),
-        ));
+        if let Some(text) = &note.text {
+            let rendered = crate::greetings::render_farewell(
+                text,
+                user_mention,
+                user_name,
+                user_fullname,
+                username,
+                user_id,
+                chat_title,
+                member_count,
+            );
+            send_rendered(ctx, &rendered, &note.button).await?;
+            return Ok(());
+        }
+        // Button note with no text falls through to the media branch
+        // below (Python sends media + buttons together via `something()`).
     }
     if let Some(media) = &note.media {
         let _ = media;

@@ -9,11 +9,11 @@
 //! (`msgs` sets `send_messages`, `invite_users` and the misspelled
 //! `pin_messageschange_info` attribute — the last of which is a no-op
 //! field name in Python and is therefore dropped here with a note).
-//! The `EditChatDefaultBannedRightsRequest` RPC itself is a
-//! `TODO(responder-op)` site.
+//! The `EditChatDefaultBannedRightsRequest` RPC is wired to
+//! `edit_default_rights`.
 
 use crate::util::{def, reg_add};
-use ultroid_core::{CommandDef, Ctx, Error, Registry, Result};
+use ultroid_core::{BannedRights, CommandDef, Ctx, Registry, Result};
 
 pub const HELP: &str = "✘ Commands Available -\n\n• `{i}lock <msgs/media/sticker/gif/games/inline/polls/invites/pin/changeinfo>`\n    Lock the Used Setting in Used Group.\n\n• `{i}unlock <msgs/media/sticker/gif/games/inline/polls/invites/pin/changeinfo>`\n    UNLOCK the Used Setting in Used Group.\n";
 
@@ -70,13 +70,29 @@ async fn un_lock(ctx: &Ctx) -> Result<()> {
         ctx.reply("`Incorrect Input`").await?;
         return Ok(());
     };
-    let _ = fields;
+    // Python builds a `ChatBannedRights` with exactly these fields set
+    // to `lock` (all other fields False) and sends
+    // `EditChatDefaultBannedRightsRequest`.
+    let mut rights = BannedRights::default();
+    for field in fields {
+        match field {
+            "send_messages" => rights.send_messages = lock,
+            "send_media" => rights.send_media = lock,
+            "send_stickers" => rights.send_stickers = lock,
+            "send_gifs" => rights.send_gifs = lock,
+            "send_games" => rights.send_games = lock,
+            "send_inline" => rights.send_inline = lock,
+            "send_polls" => rights.send_polls = lock,
+            "invite_users" => rights.invite_users = lock,
+            "pin_messages" => rights.pin_messages = lock,
+            "change_info" => rights.change_info = lock,
+            _ => {}
+        }
+    }
+    ctx.responder
+        .edit_default_rights(ctx.chat_id, rights)
+        .await?;
     let verb = if lock { "Locked" } else { "Unlocked" };
-    // TODO(responder-op): messages.EditChatDefaultBannedRightsRequest(
-    // chat, banned_rights=ChatBannedRights(...fields = lock...)).
-    // Python: plugins/locks.py:un_lock.
     let _ = verb;
-    Err(Error::Other(
-        "edit chat default banned rights requires a binary Responder op (Python: plugins/locks.py:un_lock)".into(),
-    ))
+    Ok(())
 }

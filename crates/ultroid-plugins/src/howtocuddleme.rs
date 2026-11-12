@@ -4,9 +4,10 @@
 //!
 //! 1. `cuddle_attr` — show client attributes (handler prefix, DB, client
 //!    user). The handler prefix comes from config; the client user's
-//!    name needs a `get_me` call, which is a `TODO(responder-op)`.
-//! 2. `cuddle_buttons` — styled inline buttons. Inline keyboards are not
-//!    on the `Responder` surface — `TODO(responder-op)`.
+//!    name comes from the `Responder` `me()` op. The DB connection name
+//!    has no accessor on `Ctx`, so that line is omitted.
+//! 2. `cuddle_buttons` — styled inline buttons, sent with the
+//!    `Responder` `send_markup_to` op.
 //! 3. `cuddle_guest_allowed` / `cuddle_guest_restricted` — guest-mode
 //!    gating via `allow_guest` on the `CommandDef` (real).
 //! 4. `cuddle_ask` — inline `listen()` for the next message. The core
@@ -17,6 +18,7 @@
 //!    plain command registration (Rust has no runtime plugin parts).
 
 use crate::util::{def, reg_add};
+use ultroid_core::tg::{ButtonStyle, InlineButton};
 use ultroid_core::{Ctx, Error, Registry, Result};
 
 pub fn register(registry: &mut Registry) {
@@ -75,24 +77,36 @@ pub fn register(registry: &mut Registry) {
 }
 
 async fn show_attributes(ctx: &Ctx) -> Result<()> {
-    // TODO(responder-op): the client user's first name needs `get_me`
-    // (Python: howtocuddleme.py:show_attributes,
-    // `client.ultroid_bot.me.first_name`).
-    let _ = ctx.config.hndlr.clone();
-    Err(Error::Other(
-        "get_me (client user first name) requires a binary Responder op (Python: howtocuddleme.py:show_attributes)".to_string(),
+    // NOTE: the DB connection name has no accessor on `Ctx`, so that
+    // line from the Python version is omitted here.
+    let me = ctx.responder.me().await?;
+    ctx.reply(&format!(
+        "✨ **Modernized Client Attributes**:\n• Handler: `{}`\n• Client User: `{}`",
+        ctx.config.hndlr, me.first_name
     ))
+    .await?;
+    Ok(())
 }
 
 async fn show_buttons(ctx: &Ctx) -> Result<()> {
     // The Python version builds a styled ReplyInlineMarkup (danger /
-    // success / primary rows + a URL button) via `ikm(...)`.
-    // TODO(responder-op): send a message with inline buttons
-    // (Python: howtocuddleme.py:show_buttons).
-    let _ = ctx;
-    Err(Error::Other(
-        "send message with inline buttons requires a binary Responder op (Python: howtocuddleme.py:show_buttons)".to_string(),
-    ))
+    // success / primary rows + a URL button) via `ikm(...)`; the style
+    // is carried on each `InlineButton` here.
+    let buttons = vec![
+        vec![
+            InlineButton::data("Danger Action", b"cuddle_click_danger".to_vec())
+                .styled(ButtonStyle::Danger),
+        ],
+        vec![
+            InlineButton::data("Success Action", b"cuddle_click_success".to_vec())
+                .styled(ButtonStyle::Success),
+        ],
+        vec![InlineButton::url("Info link", "https://google.com").styled(ButtonStyle::Primary)],
+    ];
+    ctx.responder
+        .send_markup_to(ctx.chat_id, "💖 Choose a custom styled action:", buttons)
+        .await?;
+    Ok(())
 }
 
 async fn guest_allowed(ctx: &Ctx) -> Result<()> {

@@ -1,12 +1,13 @@
 //! Extra message utilities — port of `plugins/extra.py` (85 LOC).
 //!
 //! `.del` / `.copy` / `.edit` / `.reply`: small message-management
-//! commands. Reading the replied message, editing or deleting a message
-//! other than the command message itself, and iterating the account's own
-//! messages are binary Responder operations (no such surface on `Ctx`
-//! today); those sites return the honest `TODO(responder-op)` error.
-//! Everything around them — argument handling, the no-reply branches,
-//! deleting the command message itself — is implemented for real.
+//! commands. The replied message is read, edited, deleted and re-sent
+//! through the Responder (`message_summary`, `edit`, `delete`); iterating
+//! the account's own messages is not on the trait, so `.edit` with no
+//! reply and `.reply` with a reply keep their honest
+//! `TODO(responder-op)` error. Everything around them — argument
+//! handling, the no-reply branches, deleting the command message
+//! itself — is implemented for real.
 
 use ultroid_core::{Ctx, Error, Registry, Result};
 
@@ -37,43 +38,58 @@ pub fn register(registry: &mut Registry) {
 /// `.` and `/` prefixes, so no extra flag is needed).
 async fn delete_it(ctx: &Ctx) -> Result<()> {
     // Python: `msg_src = await delme.get_reply_message()`; no reply → return.
-    if ctx.reply_to_id.is_none() {
+    let Some(reply_id) = ctx.reply_to_id else {
         return Ok(());
-    }
-    // TODO(responder-op): delete the replied message (`msg_src.try_delete()`)
-    // and then the command message (`delme.try_delete()`).
-    Err(Error::Other(
-        "delete replied message requires a binary Responder op (Python: extra.py:delete_it)"
-            .to_string(),
-    ))
+    };
+    ctx.delete(reply_id).await?;
+    ctx.delete(ctx.message_id).await?;
+    Ok(())
 }
 
-/// `.copy` — `plugins/extra.py:copy`.
+/// `.copy` — `plugins/extra.py:copy`. Text replies are re-sent as the
+/// account's own message; a media reply cannot be re-sent (no trait op
+/// re-sends stored media), so it is an honest error.
 async fn copy_cmd(ctx: &Ctx) -> Result<()> {
-    if ctx.reply_to_id.is_none() {
+    let Some(reply_id) = ctx.reply_to_id else {
         // Python: `await e.eor(get_string("ex_1"), time=5)`.
         ctx.reply(&ctx.get_str("ex_1")).await?;
         return Ok(());
+    };
+    let Some(summary) = ctx
+        .responder
+        .message_summary(ctx.chat_id, reply_id as i32)
+        .await?
+    else {
+        return Err(Error::Other(
+            "the replied message is no longer available".into(),
+        ));
+    };
+    if summary.has_media {
+        return Err(Error::Other(
+            "re-sending a media message requires a binary Responder op (Python: extra.py:copy)"
+                .to_string(),
+        ));
     }
-    // TODO(responder-op): fetch the replied message and re-send it
-    // (`await reply.reply(reply)`), then delete the command message.
-    Err(Error::Other(
-        "fetch + re-send replied message requires a binary Responder op (Python: extra.py:copy)"
-            .to_string(),
-    ))
+    if summary.text.is_empty() {
+        return Err(Error::Other(
+            "the replied message has no text to copy".into(),
+        ));
+    }
+    ctx.reply(&summary.text).await?;
+    ctx.delete(ctx.message_id).await?;
+    Ok(())
 }
 
 /// `.edit <text>` — `plugins/extra.py:editer`.
 /// Python takes `message[6:]` (text after `.edit `), which is `ctx.args`.
 async fn edit_cmd(ctx: &Ctx) -> Result<()> {
     let string = ctx.args.trim().to_string();
-    if ctx.reply_to_id.is_some() {
-        // TODO(responder-op): fetch the replied message and edit it
-        // (`await reply.edit(string)`), then delete the command message.
-        return Err(Error::Other(
-            "edit replied message requires a binary Responder op (Python: extra.py:editer)"
-                .to_string(),
-        ));
+    if let Some(reply_id) = ctx.reply_to_id {
+        // Python edits the replied message (`await reply.edit(string)`),
+        // then deletes the command message.
+        ctx.edit(reply_id, &string).await?;
+        ctx.delete(ctx.message_id).await?;
+        return Ok(());
     }
     // No reply: Python edits the account's second-most-recent own message
     // (`iter_messages(chat, from_user="me", limit=2)`, index 2).

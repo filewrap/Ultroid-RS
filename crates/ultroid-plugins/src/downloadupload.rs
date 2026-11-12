@@ -20,10 +20,10 @@
 //! * `.fcancel` against the tracker (owner/sudo only).
 //!
 //! What is gated on the Responder (TODO(responder-op)): fetching Telegram
-//! messages (`.dl` reply / t.me link / album resolution, `.download`'s
-//! replied `.txt` of URLs) and downloading Telegram media
-//! (`fns.downloader` / `client.download_media`). The `.dl` handlers
-//! validate their flags first, then fail honestly at that fetch point.
+//! messages (`.dl` reply / t.me link / album resolution); `.download`'s
+//! replied `.txt` of URLs is downloaded via the Responder
+//! (`download_media`). The `.dl` handlers validate their flags first,
+//! then fail honestly at that fetch point.
 //! The owner-PM notification (`_pm_owner`) is best-effort in Python and
 //! has no equivalent on `Ctx` (the responder only talks to the trigger
 //! chat), so it is skipped, not faked.
@@ -741,14 +741,30 @@ async fn download_cmd(ctx: &Ctx) -> Result<()> {
 
     // Fall back to a replied .txt file containing one URL per line.
     if urls.is_empty() && ctx.reply_to_id.is_some() {
-        // TODO(responder-op): download the replied `.txt` file
-        // (`event.client.download_media(replied, DOWNLOAD_DIR)`), read one
-        // URL per line (skip blanks and `#` comments), then run the bulk
-        // download below (Python: downloadupload.py:down).
-        return Err(Error::Other(
-            "download replied .txt file of URLs requires a binary Responder op (Python: downloadupload.py:down)"
-                .to_string(),
-        ));
+        // Download the replied `.txt` file, read one URL per line (skip
+        // blanks and `#` comments), then run the bulk download below
+        // (Python: downloadupload.py:down).
+        let reply_id = ctx.reply_to_id.unwrap_or(0);
+        let dir = PathBuf::from(&ctx.config.data_dir).join(DOWNLOAD_DIR);
+        tokio::fs::create_dir_all(&dir).await?;
+        let dest = dir.join(format!("urls-{}.txt", uuid::Uuid::new_v4()));
+        let path = ctx
+            .responder
+            .download_media(ctx.chat_id, reply_id as i32, &dest)
+            .await?;
+        let text = tokio::fs::read_to_string(&path)
+            .await
+            .map_err(|e| Error::Other(format!("replied .txt file is not readable text: {e}")))?;
+        let _ = tokio::fs::remove_file(&path).await;
+        for line in text.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            if line.starts_with("http://") || line.starts_with("https://") {
+                urls.push(line.to_string());
+            }
+        }
     }
 
     let msg_id = ctx.reply(&ctx.get_str("com_1")).await?;

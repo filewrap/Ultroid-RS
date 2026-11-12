@@ -3,14 +3,14 @@
 //! `.setname <first // last>`, `.setbio <bio>`, `.setpic` (reply to a
 //! pic/video), `.delpfp [n|all]`, `.poto <user>/reply [-dl] [n|all]`.
 //!
-//! Argument parsing is real. Every one of these ends in an
-//! `account.*` / `photos.*` RPC or a media download, none of which the
-//! `Ctx`/`Responder` surface exposes — each handler validates its input
-//! and then returns an honest `TODO(responder-op)` error at the exact
-//! point the Telegram op is needed.
+//! Argument parsing is real, and the handlers are wired to the
+//! `Responder` ops (`update_profile`, `download_media` +
+//! `upload_profile_photo`, `delete_profile_photos`,
+//! `resolve_user` + `download_profile_photos`).
 
 use crate::util::{def, reg_add};
-use ultroid_core::{Ctx, Error, Registry, Result};
+use std::path::PathBuf;
+use ultroid_core::{Ctx, Registry, Result};
 
 pub fn register(registry: &mut Registry) {
     let mut bio = def(
@@ -56,76 +56,165 @@ pub fn register(registry: &mut Registry) {
     );
 }
 
-fn responder_op(op: &str) -> Error {
-    Error::Other(format!(
-        "{op} requires a binary Responder op (Python: profile.py)"
-    ))
-}
-
 async fn setbio(ctx: &Ctx) -> Result<()> {
     let bio = ctx.args.trim();
-    let _id = ctx.reply("...").await?;
-    // TODO(responder-op): account.UpdateProfileRequest(about=bio)
-    // (Python: profile.py:_).
-    Err(responder_op(&format!(
-        "account.UpdateProfileRequest(about='{bio}')"
-    )))
+    let id = ctx.reply("...").await?;
+    // account.UpdateProfileRequest(about=bio) (Python: profile.py:_).
+    ctx.responder.update_profile(None, None, Some(bio)).await?;
+    ctx.edit(id, "`Bio updated.`").await
 }
 
 async fn setname(ctx: &Ctx) -> Result<()> {
     let names = ctx.args.trim();
-    let _id = ctx.reply("...").await?;
+    let id = ctx.reply("...").await?;
     let (first, last) = match names.split_once("//") {
         Some((f, l)) => (f.trim(), l.trim()),
         None => (names, ""),
     };
-    // TODO(responder-op): account.UpdateProfileRequest(first_name, last_name)
+    // account.UpdateProfileRequest(first_name, last_name)
     // (Python: profile.py:_).
-    Err(responder_op(&format!(
-        "account.UpdateProfileRequest(first_name='{first}', last_name='{last}')"
-    )))
+    ctx.responder
+        .update_profile(Some(first), Some(last), None)
+        .await?;
+    ctx.edit(id, "`Name updated.`").await
 }
 
 async fn setpic(ctx: &Ctx) -> Result<()> {
-    if ctx.reply_to_id.is_none() {
-        ctx.reply("`Reply to a Media..`").await?;
-        return Ok(());
-    }
-    let _id = ctx.reply(&ctx.get_str("com_1")).await?;
-    // TODO(responder-op): download the replied media, upload it, then
-    // photos.UploadProfilePhotoRequest(file/video) (Python: profile.py:_).
-    Err(responder_op(
-        "download replied media + photos.UploadProfilePhotoRequest",
-    ))
+    let reply_id = match ctx.reply_to_id {
+        Some(id) => id,
+        None => {
+            ctx.reply("`Reply to a Media..`").await?;
+            return Ok(());
+        }
+    };
+    let id = ctx.reply(&ctx.get_str("com_1")).await?;
+    // Download the replied media, then upload it as the profile photo
+    // (Python: profile.py:_).
+    let dest = std::env::temp_dir().join(format!("ultroid-setpic-{}", uuid::Uuid::new_v4()));
+    let path = ctx
+        .responder
+        .download_media(ctx.chat_id, reply_id as i32, &dest)
+        .await?;
+    let res = ctx.responder.upload_profile_photo(&path).await;
+    let _ = tokio::fs::remove_file(&path).await;
+    res?;
+    ctx.edit(id, "`Profile photo updated.`").await
 }
 
 async fn delpfp(ctx: &Ctx) -> Result<()> {
-    let _id = ctx.reply("`...`").await?;
+    let id = ctx.reply("`...`").await?;
     let arg = ctx.args.trim();
-    let limit: Option<i64> = match arg {
-        "all" => Some(0),
-        "" => Some(1),
-        _ => arg.parse::<i64>().ok().or(Some(1)),
+    // Python: "all" -> 0 (delete all), a number -> that many,
+    // anything else (incl. empty) -> 1. The Responder op treats
+    // limit <= 0 as "all", matching Telethon's limit=0.
+    let limit: i32 = match arg {
+        "all" => 0,
+        "" => 1,
+        _ => arg.parse::<i32>().ok().unwrap_or(1),
     };
-    let _ = limit;
-    // TODO(responder-op): get_profile_photos("me", limit) then
-    // photos.DeletePhotosRequest (Python: profile.py:remove_profilepic).
-    Err(responder_op(
-        "get_profile_photos + photos.DeletePhotosRequest",
-    ))
+    let deleted = ctx.responder.delete_profile_photos(limit).await?;
+    ctx.edit(
+        id,
+        &format!("`Successfully deleted {deleted} profile picture(s).`"),
+    )
+    .await
+}
+
+/// Parsed `.poto` arguments: (user token, limit, just download).
+/// Limit: `None` = the single most recent photo, `Some(0)` = all,
+/// `Some(n)` = the `n` most recent.
+fn parse_poto_args(arg: &str) -> (Option<String>, Option<i32>, bool) {
+    let mut user = None;
+    let mut limit = None;
+    let mut just_dl = false;
+    for tok in arg.split_whitespace() {
+        match tok {
+            "-dl" | "--dl" => just_dl = true,
+            "all" => limit = Some(0),
+            _ => {
+                if user.is_none() {
+                    user = Some(tok.to_string());
+                } else if let Ok(n) = tok.parse::<i32>() {
+                    limit = Some(n);
+                }
+            }
+        }
+    }
+    (user, limit, just_dl)
 }
 
 async fn poto(ctx: &Ctx) -> Result<()> {
-    let _id = ctx.reply(&ctx.get_str("com_1")).await?;
+    let id = ctx.reply(&ctx.get_str("com_1")).await?;
     let arg = ctx.args.trim();
-    let just_dl = arg == "-dl" || arg == "--dl";
-    let _ = just_dl;
-    // Resolving a username / a replied sender's id and downloading their
-    // profile photo(s) are both client ops.
-    // TODO(responder-op): resolve the target user and download their
-    // profile photo(s) (Python: profile.py:gpoto,
-    // `download_profile_photo` / `iter_profile_photos`).
-    Err(responder_op(
-        "resolve user + download_profile_photo / iter_profile_photos",
-    ))
+    let (user_tok, limit, just_dl) = parse_poto_args(arg);
+
+    // Resolve the target user (Python: profile.py:gpoto).
+    let dialog_id: i64 = if ctx.reply_to_id.is_some() {
+        match ctx.reply_to_sender_id {
+            Some(sender) => sender,
+            None => {
+                // Fall back to the replied message's own sender record.
+                let reply_id = ctx.reply_to_id.unwrap();
+                match ctx
+                    .responder
+                    .message_summary(ctx.chat_id, reply_id as i32)
+                    .await?
+                {
+                    Some(summary) => match summary.sender_id {
+                        Some(sender) => sender,
+                        None => {
+                            ctx.edit(id, "`Couldn't tell who sent the replied message.`")
+                                .await?;
+                            return Ok(());
+                        }
+                    },
+                    None => {
+                        ctx.edit(id, "`The replied message was deleted.`").await?;
+                        return Ok(());
+                    }
+                }
+            }
+        }
+    } else if let Some(tok) = user_tok {
+        ctx.responder.resolve_user(&tok).await?.id
+    } else {
+        // No reply and no user: the current chat (a DM peer, as in Python).
+        ctx.chat_id
+    };
+
+    let dir: PathBuf = std::env::temp_dir().join(format!("ultroid-poto-{}", uuid::Uuid::new_v4()));
+    tokio::fs::create_dir_all(&dir).await?;
+    // The Responder op clamps the limit to 1..=100, so "all" (0) is
+    // passed as 100 (the most the server returns in one call).
+    let fetch_limit = match limit {
+        None => 1,
+        Some(0) => 100,
+        Some(n) => n,
+    };
+    let photos = ctx
+        .responder
+        .download_profile_photos(dialog_id, &dir, fetch_limit)
+        .await?;
+    if photos.is_empty() {
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+        ctx.edit(id, "`Pfp Not Found...`").await?;
+        return Ok(());
+    }
+    if just_dl {
+        let list = photos
+            .iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join("\n");
+        ctx.edit(id, &format!("Downloaded pfp to [ `{list}` ]."))
+            .await?;
+        return Ok(());
+    }
+    ctx.delete(id).await?;
+    for file in &photos {
+        ctx.send_file(file, "").await?;
+        let _ = tokio::fs::remove_file(file).await;
+    }
+    let _ = tokio::fs::remove_dir_all(&dir).await;
+    Ok(())
 }

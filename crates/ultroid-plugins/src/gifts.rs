@@ -202,10 +202,21 @@ async fn gift_send(ctx: &Ctx) -> Result<()> {
             ctx.reply("`Usage: .gift <user> <gift_id> [-anon] [message...]`\n(or reply to the user's message and just give the `<gift_id>`)\nSpends real Telegram Stars — a confirmation step runs first.").await?;
             return Ok(());
         }
-        // The replied message's sender id is not visible on `Ctx`.
-        // TODO(responder-op): resolve the replied message's sender
+        // In reply form the first token is the gift id and the rest
+        // is the message; the recipient is the replied message's
+        // sender, which the binary fills on `ctx.reply_to_sender_id`
         // (Python: gifts.py:gift_send_cmd, `reply.sender_id`).
-        return Err(payments_op("resolve replied message sender for .gift"));
+        let Some(sender_id) = ctx.reply_to_sender_id else {
+            ctx.reply("Could not resolve the replied message's sender.")
+                .await?;
+            return Ok(());
+        };
+        let rest = tokens[1..].join(" ");
+        (
+            sender_id.to_string(),
+            tokens[0].clone(),
+            if rest.is_empty() { None } else { Some(rest) },
+        )
     } else {
         if tokens.len() < 2 {
             ctx.reply("`Usage: .gift <user> <gift_id> [-anon] [message...]`\n(or reply to the user's message and just give the `<gift_id>`)\nSpends real Telegram Stars — a confirmation step runs first.").await?;

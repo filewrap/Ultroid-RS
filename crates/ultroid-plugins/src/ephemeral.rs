@@ -235,12 +235,17 @@ pub fn resolve_receiver(ctx: &Ctx, raw: &str) -> Result<Option<i64>> {
     let raw = raw.trim();
     if raw.is_empty() {
         if ctx.reply_to_id.is_some() {
-            // TODO(responder-op): resolve the replied message's sender
-            // (Python: plugins/ephemeral.py:_resolve_receiver via
-            // event.get_reply_message()).
-            return Err(Error::Other(
-                "resolving the replied message's sender requires a binary Responder op (Python: plugins/ephemeral.py:_resolve_receiver)".to_string(),
-            ));
+            // The binary fills `reply_to_sender_id` from the one reply
+            // fetch it already does (Python: `_resolve_receiver` via
+            // `event.get_reply_message()`).
+            return ctx
+                .reply_to_sender_id
+                .ok_or_else(|| {
+                    Error::Other(
+                        "replied message has no sender (deleted or fetch failed)".to_string(),
+                    )
+                })
+                .map(Some);
         }
         return Ok(None);
     }

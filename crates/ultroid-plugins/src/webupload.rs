@@ -12,10 +12,11 @@
 //! callback is replaced by a single "Uploading..." status edit.
 //!
 //! The service-selection menu is delivered by inline result / inline
-//! buttons, which the `Ctx` surface cannot express: the direct `-s` path
-//! is fully real, the menu path caches the file and exposes
+//! buttons: the user-client path inline-queries the assistant and clicks
+//! the first result, the bot-client path sends the menu via
+//! `send_markup_to`; the menu path caches the file and exposes
 //! [`service_menu`] / [`webupload_cache_get`] for the binary's inline +
-//! callback handlers (see `TODO(responder-op)` below).
+//! callback handlers.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -24,7 +25,8 @@ use std::sync::{LazyLock, Mutex};
 use crate::util::{def, reg_add};
 use regex::Regex;
 use ultroid_core::fns::humanbytes;
-use ultroid_core::{Ctx, Error, Registry, Result};
+use ultroid_core::tg::InlineButton;
+use ultroid_core::{ClientKind, Ctx, Error, Registry, Result};
 
 const HELP: &str = "✘ Commands Available -\n\n• `{i}webupload` | `{i}wul`\n    Upload files on another server.\n\n    Reply to a media message or pass a file path.\n    Use `-s <service>` to upload directly without the menu.\n\n    Services: catbox, litterbox, file.io, 0x0.st, transfer.sh, uguu, filebin, siasky\n    Example: `{i}wul -s catbox` (reply to a file)";
 
@@ -554,12 +556,15 @@ async fn obtain_file(ctx: &Ctx, path: &str) -> Result<Option<(PathBuf, bool)>> {
     if ctx.reply_to_id.is_none() {
         return Ok(None);
     }
-    // TODO(responder-op): download replied-to media (Python:
-    // webupload.py:_obtain_file — `reply.download_media` / fast_downloader)
-    Err(Error::Other(
-        "downloading replied media requires a binary Responder op (Python: webupload.py:_obtain_file)"
-            .to_string(),
-    ))
+    // Download the replied media via the Responder (Python:
+    // webupload.py:_obtain_file — `reply.download_media` / fast_downloader).
+    let reply_id = ctx.reply_to_id.unwrap_or(0);
+    let dest = std::env::temp_dir().join(format!("ultroid-webupload-{}", uuid::Uuid::new_v4()));
+    let path = ctx
+        .responder
+        .download_media(ctx.chat_id, reply_id as i32, &dest)
+        .await?;
+    Ok(Some((path, true)))
 }
 
 async fn do_direct_upload(ctx: &Ctx, key: &str, file: &Path, is_temp: bool) -> Result<()> {
@@ -654,15 +659,45 @@ async fn webupload_cmd(ctx: &Ctx) -> Result<()> {
     if let Ok(mut cache) = WEBUPLOAD_CACHE.lock() {
         cache.insert((ctx.chat_id, ctx.message_id), file.clone());
     }
-    let _ = cache_key;
     let _ = ctx.delete(processing).await;
-    // TODO(responder-op): deliver the service-selection menu — user client:
-    // inline-query `fl2lnk <chat>:<msg>` on the assistant + click result;
-    // bot client: edit the status message with the `fl<key>//<cache_key>`
-    // menu from `service_menu()` (Python: webupload.py:webupload_cmd)
-    Err(Error::Other(
-        "delivering the upload service menu (inline query / inline buttons) \
-         requires a binary Responder op (Python: webupload.py:webupload_cmd)"
-            .to_string(),
-    ))
+    if ctx.client_kind != ClientKind::AsstBot {
+        // User client: inline-query `fl2lnk <chat>:<msg>` on the assistant
+        // and click the first result into this chat (Python:
+        // webupload.py:webupload_cmd).
+        let Some(asst) = &ctx.asst else {
+            return Err(Error::Other(
+                "the upload service menu needs the assistant bot, which is not connected (Python: webupload.py:webupload_cmd)".into(),
+            ));
+        };
+        let Some(bot_dialog_id) = ctx.asst_dialog_id else {
+            return Err(Error::Other(
+                "the upload service menu needs the assistant bot, which is not connected (Python: webupload.py:webupload_cmd)".into(),
+            ));
+        };
+        asst.inline_query_click(
+            bot_dialog_id,
+            &format!("fl2lnk {cache_key}"),
+            ctx.chat_id,
+            ctx.reply_to_id.map(|id| id as i32),
+        )
+        .await?;
+    } else {
+        // Bot client: send the `fl<key>//<cache_key>` menu from
+        // `service_menu()` in 2-column rows (Python edits the status
+        // message; there is no edit-with-markup op, so this sends a fresh
+        // menu message instead).
+        let rows: Vec<Vec<InlineButton>> = service_menu(&cache_key)
+            .chunks(2)
+            .map(|chunk| {
+                chunk
+                    .iter()
+                    .map(|(label, data)| InlineButton::data(label, data.as_bytes().to_vec()))
+                    .collect()
+            })
+            .collect();
+        ctx.responder
+            .send_markup_to(ctx.chat_id, "Choose Server to Upload File...", rows)
+            .await?;
+    }
+    Ok(())
 }

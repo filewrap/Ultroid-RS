@@ -13,9 +13,8 @@
 //! so they are not registered here.
 //!
 //! Each command works on a local file path given as the last argument
-//! (compress) or as an argument, and on replied-to Telegram media once it
-//! is on disk. Downloading the replied media is the single
-//! TODO(responder-op) site per command.
+//! (compress) or as an argument, and on replied-to Telegram media,
+//! downloaded via the Responder (`download_media`).
 
 use std::path::{Path, PathBuf};
 use tokio::process::Command as ProcCommand;
@@ -65,28 +64,32 @@ pub fn register(registry: &mut Registry) {
 
 // ── shared helpers ────────────────────────────────────────────────────────
 
-/// TODO(responder-op): download replied media to a local file.
-fn todo_download(python_ref: &str) -> Error {
-    Error::Other(format!(
-        "download replied media requires a binary Responder op (Python: {python_ref})"
-    ))
+/// Download the replied media via the Responder into a temp file.
+async fn download_reply(ctx: &Ctx) -> Result<PathBuf> {
+    let reply_id = ctx
+        .reply_to_id
+        .ok_or_else(|| Error::Other("reply to a message first".into()))?;
+    let dest = tmp_file("input");
+    ctx.responder
+        .download_media(ctx.chat_id, reply_id as i32, &dest)
+        .await
 }
 
-/// Last whitespace token of the args that names an existing local file.
+/// First whitespace token of the args that names an existing local file.
 fn local_input(ctx: &Ctx) -> Option<PathBuf> {
     ctx.args
         .split_whitespace()
-        .rev()
+        .next()
         .map(PathBuf::from)
-        .find(|p| p.is_file())
+        .filter(|p| p.is_file())
 }
 
-async fn resolve_input(ctx: &Ctx, python_ref: &str) -> Result<Option<PathBuf>> {
+async fn resolve_input(ctx: &Ctx, _python_ref: &str) -> Result<Option<PathBuf>> {
     if let Some(p) = local_input(ctx) {
         return Ok(Some(p));
     }
     if ctx.reply_to_id.is_some() {
-        return Err(todo_download(python_ref));
+        return Ok(Some(download_reply(ctx).await?));
     }
     Ok(None)
 }

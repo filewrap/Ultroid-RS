@@ -7,12 +7,12 @@
 //! The live watcher (`NewMessage` listener that deletes messages
 //! containing a blacklisted word) is event-driven: its match predicate is
 //! ported as a pure function (`contains_blacklisted`) for the binary's
-//! update loop, and the delete itself is a `TODO(responder-op)` site.
+//! update loop, and the delete is wired to `delete_from`.
 
 use crate::util::{def, reg_add};
 use std::collections::HashMap;
 use ultroid_core::db::{db_get_json, db_set_json};
-use ultroid_core::{CommandDef, Ctx, Error, Registry, Result};
+use ultroid_core::{CommandDef, Ctx, Registry, Result};
 
 pub const HELP: &str = " -\n\n- `{i}blacklist <word/all words with a space>`\n    blacklist the choosen word in that chat.\n\n- `{i}remblacklist <word>`\n    Remove the word from blacklist..\n\n- `{i}listblacklist`\n    list all blacklisted words.\n\n  'if a person uses blacklist Word his/her msg will be deleted'\n  'And u Must be Admin in that Chat'\n";
 
@@ -147,11 +147,9 @@ pub fn contains_blacklisted(text: &str, words: &[String]) -> bool {
 }
 
 /// Delete a message that tripped the blacklist (Python `blacklist`).
-pub async fn delete_blacklisted(_ctx: &Ctx, _message_id: i64) -> Result<()> {
-    // TODO(responder-op): delete the offending message.
-    // Python: plugins/blacklist.py:blacklist.
-    Err(Error::Other(
-        "delete message requires a binary Responder op (Python: plugins/blacklist.py:blacklist)"
-            .into(),
-    ))
+pub async fn delete_blacklisted(ctx: &Ctx, message_id: i64) -> Result<()> {
+    ctx.responder
+        .delete_from(ctx.chat_id, &[message_id as i32])
+        .await?;
+    Ok(())
 }

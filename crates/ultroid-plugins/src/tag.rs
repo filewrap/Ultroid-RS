@@ -251,14 +251,89 @@ async fn tagall(ctx: &Ctx) -> Result<()> {
         return Ok(());
     }
     let _ = ctx.reply(&ctx.get_str("com_1")).await?;
-    // TODO(responder-op): get_participants(chat, limit=200) + filter by
-    // status / admin / bot, then send one tag per user (regular send or
-    // ephemeral SendMessageRequest). Python: plugins/tag.py:
-    // _get_filtered_participants / _run_tag_session / _send_ephemeral_tag.
-    Err(todo_op(
-        "fetch participants + send tag messages",
-        "plugins/tag.py:_get_filtered_participants",
-    ))
+    // Ephemeral tags need `SendMessageRequest(receiver_id=...)`, which
+    // the trait does not expose; online/offline/recent filters need
+    // `UserStatus`, which `ParticipantInfo` does not carry.
+    if _flags.mode == "ephemeral" {
+        // TODO(responder-op): ephemeral tag send (SendMessageRequest
+        // with receiver_id). Python: plugins/tag.py:_send_ephemeral_tag.
+        return Err(todo_op(
+            "send ephemeral tag messages",
+            "plugins/tag.py:_send_ephemeral_tag",
+        ));
+    }
+    if matches!(_flags.filter.as_str(), "on" | "off" | "rec") {
+        // TODO(responder-op): filter participants by UserStatus.
+        // Python: plugins/tag.py:_get_filtered_participants.
+        return Err(todo_op(
+            "fetch participants filtered by online status",
+            "plugins/tag.py:_get_filtered_participants",
+        ));
+    }
+    // Python fetches at most 200 participants.
+    let (page, _total) = ctx.responder.participants(ctx.chat_id, 200, 0).await?;
+    let users: Vec<&ultroid_core::ParticipantInfo> = page
+        .iter()
+        .filter(|p| {
+            if _flags.admins_only && !p.admin {
+                return false;
+            }
+            match _flags.filter.as_str() {
+                "bots" => p.user.bot,
+                "owner" => p.owner,
+                // "admins" matches no filter branch in Python's
+                // `_get_filtered_participants` (it checks "admin",
+                // which is not a valid tagall filter), so it tags
+                // everyone; `-a` is the admin filter.
+                _ => true,
+            }
+        })
+        .collect();
+    if users.is_empty() {
+        ctx.reply("**Tag**\n\n**Error:** No participants found")
+            .await?;
+        return Ok(());
+    }
+    let total = users.len();
+    let session_id = generate_session_id();
+    set_session(
+        session_id.clone(),
+        TagSession {
+            filter: _flags.filter.clone(),
+            mode: _flags.mode.clone(),
+            admins_only: _flags.admins_only,
+            hidden: _flags.hidden,
+            custom_msg: _flags.custom_msg.clone(),
+            total,
+            cancelled: false,
+            started: now_secs(),
+        },
+    );
+    let mut sent = 0usize;
+    let mut failed = 0usize;
+    for p in &users {
+        if get_session(&session_id)
+            .map(|s| s.cancelled)
+            .unwrap_or(false)
+        {
+            break;
+        }
+        let mention = format!("[{}](tg://user?id={})", p.user.first_name, p.user.id);
+        let username_or_id = p
+            .user
+            .username
+            .clone()
+            .unwrap_or_else(|| p.user.id.to_string());
+        let text = tag_text_for(&mention, &username_or_id, &_flags);
+        match ctx.responder.send_to(ctx.chat_id, &text).await {
+            Ok(_) => sent += 1,
+            Err(_) => failed += 1,
+        }
+    }
+    del_session(&session_id);
+    ctx.reply(&session_card("Completed", sent, total, failed))
+        .await?;
+    Ok(())
 }
 
 async fn tagcancel(ctx: &Ctx) -> Result<()> {
@@ -299,12 +374,22 @@ async fn tagcancel(ctx: &Ctx) -> Result<()> {
     Ok(())
 }
 
-async fn tag_owner(_ctx: &Ctx) -> Result<()> {
-    // TODO(responder-op): get_participants(chat, limit=200), find the
-    // ChannelParticipantCreator, send a 👑 mention.
-    // Python: plugins/tag.py:tagowner.
-    Err(todo_op(
-        "fetch participants + tag chat owner",
-        "plugins/tag.py:tagowner",
-    ))
+async fn tag_owner(ctx: &Ctx) -> Result<()> {
+    // Python fetches at most 200 participants and tags the creator.
+    let (page, _total) = ctx.responder.participants(ctx.chat_id, 200, 0).await?;
+    for p in &page {
+        if p.owner {
+            let mention = format!("[{}](tg://user?id={})", p.user.first_name, p.user.id);
+            ctx.responder
+                .send_to(ctx.chat_id, &format!("👑 {mention}"))
+                .await?;
+            ctx.reply(&format!(
+                "**Tag**\n\n**Status:** Tagged owner\n**Owner:** {mention}"
+            ))
+            .await?;
+            return Ok(());
+        }
+    }
+    ctx.reply("**Tag**\n\n**Error:** No owner found").await?;
+    Ok(())
 }

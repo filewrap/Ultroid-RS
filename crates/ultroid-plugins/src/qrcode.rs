@@ -54,20 +54,13 @@ pub fn register(registry: &mut Registry) {
     );
 }
 
-/// TODO(responder-op): download replied media to a local file.
-fn todo_download(python_ref: &str) -> Error {
-    Error::Other(format!(
-        "download replied media requires a binary Responder op (Python: {python_ref})"
-    ))
-}
-
 fn tmp_file(ext: &str) -> PathBuf {
     std::env::temp_dir().join(format!("ultroid-qr-{}.{ext}", uuid::Uuid::new_v4()))
 }
 
 /// Resolve the input file: a local path among the args, else replied
-/// media (TODO site), else usage error.
-async fn resolve_input(ctx: &Ctx, python_ref: &str) -> Result<Option<PathBuf>> {
+/// media (downloaded via the Responder), else usage error.
+async fn resolve_input(ctx: &Ctx, _python_ref: &str) -> Result<Option<PathBuf>> {
     if let Some(p) = ctx
         .args
         .split_whitespace()
@@ -76,8 +69,13 @@ async fn resolve_input(ctx: &Ctx, python_ref: &str) -> Result<Option<PathBuf>> {
     {
         return Ok(Some(p));
     }
-    if ctx.reply_to_id.is_some() {
-        return Err(todo_download(python_ref));
+    if let Some(reply_id) = ctx.reply_to_id {
+        let dest = tmp_file("png");
+        let path = ctx
+            .responder
+            .download_media(ctx.chat_id, reply_id as i32, &dest)
+            .await?;
+        return Ok(Some(path));
     }
     Ok(None)
 }

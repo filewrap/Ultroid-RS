@@ -600,13 +600,28 @@ async fn zip_cmd(ctx: &Ctx) -> Result<()> {
         }
         let _ = tokio::fs::remove_file(&tmp_file).await;
     } else if has_reply {
-        // TODO(responder-op): download replied media (Python: ziptools.py:zip_cmd
-        // — `fns.downloader` / `event.download_media`)
-        let _ = ctx.delete(processing).await;
-        return Err(Error::Other(
-            "downloading replied media requires a binary Responder op (Python: ziptools.py:zip_cmd)"
-                .to_string(),
-        ));
+        // Download the replied media and zip it (Python:
+        // ziptools.py:zip_cmd — `fns.downloader` / `event.download_media`).
+        let reply_id = ctx.reply_to_id.unwrap_or(0);
+        let downloaded = PathBuf::from(ZIP_CACHE_DIR).join(format!("dl_{t}"));
+        let downloaded = ctx
+            .responder
+            .download_media(ctx.chat_id, reply_id as i32, &downloaded)
+            .await?;
+        if let Err(e) = create_zip(
+            &[downloaded.clone()],
+            &output_path,
+            password.as_deref(),
+            level,
+            &method,
+        )
+        .await
+        {
+            let _ = tokio::fs::remove_file(&downloaded).await;
+            let _ = ctx.delete(processing).await;
+            return Err(e);
+        }
+        let _ = tokio::fs::remove_file(&downloaded).await;
     } else {
         let _ = ctx.delete(processing).await;
         ctx.reply_html(&err_reply("Zip", "Reply to a file or provide text content"))
@@ -665,11 +680,15 @@ async fn unzip_cmd(ctx: &Ctx) -> Result<()> {
 
     let file_path: PathBuf;
     if file_id.is_empty() && has_reply {
-        // TODO(responder-op): download replied zip (Python: ziptools.py:unzip_cmd)
-        return Err(Error::Other(
-            "downloading replied media requires a binary Responder op (Python: ziptools.py:unzip_cmd)"
-                .to_string(),
-        ));
+        // Download the replied zip via the Responder (Python:
+        // ziptools.py:unzip_cmd).
+        let reply_id = ctx.reply_to_id.unwrap_or(0);
+        tokio::fs::create_dir_all(ZIP_CACHE_DIR).await?;
+        let dest = PathBuf::from(ZIP_CACHE_DIR).join(format!("dl_{}.zip", uuid::Uuid::new_v4()));
+        file_path = ctx
+            .responder
+            .download_media(ctx.chat_id, reply_id as i32, &dest)
+            .await?;
     } else if !file_id.is_empty() {
         match resolve_file(&file_id) {
             Some(p) => file_path = p,
@@ -825,11 +844,15 @@ async fn list_cmd(ctx: &Ctx) -> Result<()> {
 
     let file_path: PathBuf;
     if file_id.is_empty() && has_reply {
-        // TODO(responder-op): download replied zip (Python: ziptools.py:list_cmd)
-        return Err(Error::Other(
-            "downloading replied media requires a binary Responder op (Python: ziptools.py:list_cmd)"
-                .to_string(),
-        ));
+        // Download the replied zip via the Responder (Python:
+        // ziptools.py:list_cmd).
+        let reply_id = ctx.reply_to_id.unwrap_or(0);
+        tokio::fs::create_dir_all(ZIP_CACHE_DIR).await?;
+        let dest = PathBuf::from(ZIP_CACHE_DIR).join(format!("dl_{}.zip", uuid::Uuid::new_v4()));
+        file_path = ctx
+            .responder
+            .download_media(ctx.chat_id, reply_id as i32, &dest)
+            .await?;
     } else if !file_id.is_empty() {
         match resolve_file(&file_id) {
             Some(p) => file_path = p,
@@ -884,12 +907,25 @@ async fn azip_cmd(ctx: &Ctx) -> Result<()> {
             .await?;
         return Ok(());
     }
-    // TODO(responder-op): download replied media into `zipbatch/`
-    // (Python: ziptools.py:azipp — `fns.downloader` / `event.download_media`)
-    Err(Error::Other(
-        "downloading replied media requires a binary Responder op (Python: ziptools.py:azipp)"
-            .to_string(),
+    // Download the replied media into `zipbatch/` (Python:
+    // ziptools.py:azipp — `fns.downloader` / `event.download_media`).
+    let reply_id = ctx.reply_to_id.unwrap_or(0);
+    tokio::fs::create_dir_all(BATCH_DIR).await?;
+    let dest = PathBuf::from(BATCH_DIR).join(format!("dl_{}", uuid::Uuid::new_v4()));
+    let file = ctx
+        .responder
+        .download_media(ctx.chat_id, reply_id as i32, &dest)
+        .await?;
+    ctx.reply_html(&fmtmsg(
+        "Batch",
+        &[
+            ("Status", "Added".to_string()),
+            ("File", format!("`{}`", file.display())),
+            ("Hint", "Reply to other files then use `dozip`".to_string()),
+        ],
     ))
+    .await?;
+    Ok(())
 }
 
 async fn dozip_cmd(ctx: &Ctx) -> Result<()> {

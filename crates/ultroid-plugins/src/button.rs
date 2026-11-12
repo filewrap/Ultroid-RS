@@ -5,24 +5,20 @@
 //! (`| same` appends to the previous row), and the spans are stripped
 //! from the text.
 //!
-//! The send path cannot be expressed through `Ctx` in this wave:
-//! * Replied media must be downloaded and — for photos/gifs/videos —
-//!   uploaded to Telegraph (`telegraph.upload_file`) for a `graph.org`
-//!   URL, or packed as a bot file id otherwise. There is no
-//!   replied-media download op.
-//! * The final send goes through `_inline.something`: an assistant-bot
-//!   inline query (`stf<n>`) + click. There is no inline-query op.
-//! Both are honest `TODO(responder-op)` errors at the exact call site.
+//! The send path: Python delivers through `_inline.something` — an
+//! assistant-bot inline query (`stf<n>`) + click — but the `stf` result
+//! is built from a `STUFF` entry registered in the assistant crate's
+//! inline handler, which plugins cannot register. The same visible
+//! result (text + URL buttons in this chat) is delivered directly with
+//! `Responder::send_markup_to` instead. Replied media still cannot be
+//! delivered: its kind (pic/gif/video vs other) is not exposed by any
+//! trait op, and without it the Telegraph-upload vs bot-file-id branch
+//! cannot be chosen, so a media reply is an honest error at that site.
 
 use crate::util::{def, reg_add};
 use regex::Regex;
+use ultroid_core::tg::InlineButton;
 use ultroid_core::{Ctx, Error, Registry, Result};
-
-fn todo_op(op: &str, pyref: &str) -> Error {
-    Error::Other(format!(
-        "{op} requires a binary Responder op (Python: {pyref})"
-    ))
-}
 
 /// One URL-button row, as `fns.create_tl_btn` builds it:
 /// `Vec` of rows, each row a `Vec` of `(label, url)`.
@@ -61,11 +57,21 @@ async fn button(ctx: &Ctx) -> Result<()> {
     if text.trim().is_empty() {
         text = ctx.reply_to_text.clone().unwrap_or_default();
     }
-    if ctx.reply_to_id.is_some() {
-        // TODO(responder-op): download the replied message's media and
-        // Telegraph-upload photos/gifs/videos (or pack a bot file id)
-        // (Python: button.py:butt -> wt.download_media + telegraph uf).
-        tracing::debug!("button: replied media needs a Responder media-download op");
+    if let Some(reply_id) = ctx.reply_to_id {
+        // A replied message with media needs the media-kind branch
+        // (Telegraph upload for pics/gifs/videos, bot file id otherwise);
+        // the trait exposes neither the kind nor the pack op.
+        if let Some(summary) = ctx
+            .responder
+            .message_summary(ctx.chat_id, reply_id as i32)
+            .await?
+        {
+            if summary.has_media {
+                return Err(Error::Other(
+                    "delivering a button message with replied media requires a binary Responder op (media kind + Telegraph upload / bot file id) (Python: button.py:butt)".to_string(),
+                ));
+            }
+        }
     }
     if text.trim().is_empty() {
         return ctx
@@ -74,14 +80,23 @@ async fn button(ctx: &Ctx) -> Result<()> {
             .map(|_| ());
     }
     let (clean_text, buttons) = get_msg_button(&text);
-    let _ = (clean_text, buttons);
-    // TODO(responder-op): deliver via assistant inline query
-    // (`_inline.something` -> inline_query "stf<n>" + click)
-    // (Python: button.py:butt -> something(event, text, media, buttons)).
-    Err(todo_op(
-        "assistant inline query 'stf<n>' + click (button message delivery)",
-        "button.py:butt",
-    ))
+    if buttons.is_empty() {
+        ctx.responder.send_to(ctx.chat_id, &clean_text).await?;
+    } else {
+        let rows: Vec<Vec<InlineButton>> = buttons
+            .iter()
+            .map(|row| {
+                row.iter()
+                    .map(|(label, url)| InlineButton::url(label, url))
+                    .collect()
+            })
+            .collect();
+        ctx.responder
+            .send_markup_to(ctx.chat_id, &clean_text, rows)
+            .await?;
+    }
+    let _ = ctx.delete(ctx.message_id).await;
+    Ok(())
 }
 
 pub fn register(registry: &mut Registry) {

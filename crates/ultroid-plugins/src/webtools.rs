@@ -7,10 +7,12 @@
 //! * `.miniapp [token new]` — Mini App settings-dashboard link (owner-only).
 //! * `.webappdata` — show the last web_app data captured (owner-only).
 //!
-//! Telegram cannot express inline/reply keyboards, web-view requests, or
-//! cross-peer sends through the `Ctx`/`Responder` surface, so the button
-//! sends are honest `TODO(responder-op)` errors; everything around them
-//! (parsing, gating, token minting/rotation, capture formatting) is real.
+//! Inline web_app buttons go through the Responder (`send_markup_to`),
+//! so `.webapp` and `.miniapp` send for real; the reply-keyboard button
+//! (`.simplewebapp`) and the web-view request (`.webview`) have no
+//! Responder op and stay honest `TODO(responder-op)` errors. Everything
+//! around them (parsing, gating, token minting/rotation, capture
+//! formatting) is real.
 //! The two update listeners (`MessageActionWebViewDataSent*` and
 //! `UpdateWebViewResultSent`) belong to the binary's update loop — see the
 //! `record_webapp_data` hook below.
@@ -19,7 +21,8 @@ use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex};
 
 use crate::util::{db_get, db_set, def, reg_add};
-use ultroid_core::{Ctx, Error, Registry, Result};
+use ultroid_core::tg::InlineButton;
+use ultroid_core::{ChatType, Ctx, Error, Registry, Result};
 
 const HELP: &str = "Web tools / web_app demonstration plugin (W3-B).\n\n• `{i}webapp <url> [text]`\n    Send a message with a web_app inline button.\n\n• `{i}simplewebapp <url> [text]`\n    Send a message with a reply-keyboard simple web_app button.\n\n• `{i}webview <bot_username> <url>`\n    Request a web view from a bot and report the returned URL.\n\n• `{i}miniapp [token new]`\n    Open the Mini App settings dashboard, or rotate its access token.\n\n• `{i}webappdata`\n    Show the last web_app data captured by the listeners.";
 
@@ -120,13 +123,16 @@ async fn webapp_cmd(ctx: &Ctx) -> Result<()> {
         text
     };
     let _ = (url, text);
-    // TODO(responder-op): send message with a web_app inline button
-    // (Python: webtools.py:webapp_cmd — `event.eor(text, buttons=ikm(...))`)
-    Err(Error::Other(
-        "sending a message with a web_app inline button requires a binary \
-         Responder op (Python: webtools.py:webapp_cmd)"
-            .to_string(),
-    ))
+    // Send the message with a web_app inline button (Python:
+    // webtools.py:webapp_cmd — `event.eor(text, buttons=ikm(...))`).
+    ctx.responder
+        .send_markup_to(
+            ctx.chat_id,
+            text,
+            vec![vec![InlineButton::web_app(text, url)]],
+        )
+        .await?;
+    Ok(())
 }
 
 async fn simplewebapp_cmd(ctx: &Ctx) -> Result<()> {
@@ -244,15 +250,26 @@ async fn miniapp_cmd(ctx: &Ctx) -> Result<()> {
         token
     );
     let _ = settings_url;
-    // TODO(responder-op): send the settings-dashboard message with a web_app
-    // inline button (private chat), or deliver it to Saved Messages when
-    // invoked in a group/channel so the bearer token is never posted
-    // publicly (Python: webtools.py:miniapp_cmd)
-    Err(Error::Other(
-        "sending the Mini App dashboard web_app button requires a binary \
-         Responder op (Python: webtools.py:miniapp_cmd)"
-            .to_string(),
-    ))
+    // Send the settings-dashboard message with a web_app inline button
+    // (Python: webtools.py:miniapp_cmd). In a group/channel the bearer
+    // token must never be posted publicly: deliver it to Saved Messages
+    // instead and leave only a generic notice here.
+    let buttons = vec![vec![InlineButton::web_app(
+        "Open Settings ⚙️",
+        &settings_url,
+    )]];
+    let text = "**Mini App Settings Dashboard**\nTap below to open it.";
+    if ctx.chat_type == ChatType::Private {
+        ctx.responder
+            .send_markup_to(ctx.chat_id, text, buttons)
+            .await?;
+    } else {
+        let me = ctx.responder.me().await?;
+        ctx.responder.send_markup_to(me.id, text, buttons).await?;
+        ctx.reply("`Mini App settings link sent to Saved Messages.`")
+            .await?;
+    }
+    Ok(())
 }
 
 async fn webappdata_cmd(ctx: &Ctx) -> Result<()> {

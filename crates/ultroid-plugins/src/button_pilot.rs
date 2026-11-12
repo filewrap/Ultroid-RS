@@ -1,10 +1,10 @@
 //! Button pilot — port of `plugins/button_pilot.py` (`.buttonpilot`).
 //!
 //! A demo command that sends an inline keyboard with colorized buttons
-//! (primary/danger/success) through the assistant bot. Sending a message
-//! with an inline keyboard through the assistant needs an assistant-send
-//! op that does not exist on `Responder`, so the command is an honest
-//! `TODO(responder-op)` error.
+//! (primary/danger/success) through the assistant bot, wired via the
+//! assistant responder's `send_markup_to` (the callback payloads match
+//! Python's `pilot_<color>` data exactly; the callback handler itself
+//! lives on the assistant crate).
 //!
 //! The `pilot_<color>` callback is an assistant-bot callback handler, not
 //! a command; there is no callback registration surface in the plugin
@@ -15,6 +15,7 @@
 //! `green` -> "GREEN (style: success, icon: 3) 🟢".
 
 use crate::util::reg_add;
+use ultroid_core::tg::{ButtonStyle, InlineButton};
 use ultroid_core::{CommandDef, Ctx, Error, Registry, Result};
 
 /// The color answer the `pilot_<color>` callback would edit into the
@@ -32,15 +33,25 @@ pub fn pilot_answer(color: &str) -> String {
 /// `.buttonpilot` — port of `button_pilot.py::button_pilot_cmd`.
 async fn button_pilot(ctx: &Ctx) -> Result<()> {
     tracing::info!("buttonpilot command triggered.");
-    // TODO(responder-op): assistant-bot send_message with the colorized
-    // inline keyboard (Blue/primary, Red/danger, Green/success)
-    // (Python: button_pilot.py:button_pilot_cmd -> asst.send_message).
-    let _ = ctx;
-    Err(Error::Other(
-        "assistant send with inline keyboard (button pilot) requires a \
-         binary Responder op (Python: button_pilot.py:button_pilot_cmd)"
-            .to_string(),
-    ))
+    let Some(asst) = &ctx.asst else {
+        return Err(Error::Other(
+            "sending the button pilot keyboard requires the assistant bot to be connected".into(),
+        ));
+    };
+    let rows = vec![
+        vec![
+            InlineButton::data("Blue Button", b"pilot_blue".to_vec()).styled(ButtonStyle::Primary),
+        ],
+        vec![InlineButton::data("Red Button", b"pilot_red".to_vec()).styled(ButtonStyle::Danger)],
+        vec![
+            InlineButton::data("Green Button", b"pilot_green".to_vec())
+                .styled(ButtonStyle::Success),
+        ],
+    ];
+    asst.send_markup_to(ctx.chat_id, "🎨 **Select a custom color button:**", rows)
+        .await?;
+    let _ = ctx.delete(ctx.message_id).await;
+    Ok(())
 }
 
 pub fn register(registry: &mut Registry) {

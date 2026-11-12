@@ -14,10 +14,11 @@
 //! surface and are not wired here — the DB operations behind them are.
 //!
 //! Telegram operations the `Responder` surface cannot express (contacts
-//! block/unblock, `ReportSpam`, `edit_folder` archive moves, fetching the
-//! blocked list, resolving arbitrary users, log-channel sends from the
-//! assistant) return `Err(Error::Other(...))` naming the missing op at
-//! the exact call site, per the `TODO(responder-op)` rule.
+//! block/unblock, `ReportSpam`, fetching the blocked list, log-channel
+//! sends from the assistant) return `Err(Error::Other(...))` naming the
+//! missing op at the exact call site, per the `TODO(responder-op)` rule.
+//! Archive moves are wired through `Responder::set_archived`
+//! (best-effort, as Python wraps them in try/except pass).
 
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
@@ -195,14 +196,15 @@ fn log_channel_note() -> Result<()> {
 /// Resolve the target user for approve/disapprove/block/unblock.
 ///
 /// Python resolves a replied-to sender, a parsed id/username, or the
-/// current private chat. The command context carries no replied-message
-/// sender, so reply targets and @usernames need entity resolution.
-fn resolve_target(ctx: &Ctx) -> Result<i64> {
+/// current private chat. The replied sender comes from
+/// `ctx.reply_to_sender_id`; a `@username` resolves via `resolve_user`.
+async fn resolve_target(ctx: &Ctx) -> Result<i64> {
     if ctx.reply_to_id.is_some() {
-        // TODO(responder-op): resolve the replied message's sender
-        // (Python: plugins/pmpermit.py approvepm via get_reply_message()).
+        if let Some(sender_id) = ctx.reply_to_sender_id {
+            return Ok(sender_id);
+        }
         return Err(Error::Other(
-            "resolving the replied message's sender requires a binary Responder op (Python: plugins/pmpermit.py approvepm/disapprovepm/blockpm/unblockpm)".to_string(),
+            "could not determine the replied message's sender".into(),
         ));
     }
     let arg = ctx.args.trim();
@@ -211,11 +213,8 @@ fn resolve_target(ctx: &Ctx) -> Result<i64> {
         if let Ok(id) = first.trim_start_matches('@').parse::<i64>() {
             return Ok(id);
         }
-        // TODO(responder-op): parse_id(@username) entity resolution
-        // (Python: plugins/pmpermit.py blockpm/unblockpm).
-        return Err(Error::Other(
-            "resolving @username to a user id requires a binary Responder op (Python: plugins/pmpermit.py blockpm/unblockpm via client.parse_id)".to_string(),
-        ));
+        let user = ctx.responder.resolve_user(first).await?;
+        return Ok(user.id);
     }
     if ctx.chat_type == ChatType::Private {
         return Ok(ctx.chat_id);
@@ -289,11 +288,31 @@ async fn cmd_archive(ctx: &Ctx) -> Result<()> {
                 .await?;
         }
         "clear" => {
-            // TODO(responder-op): unarchive all chats
-            // (Python: plugins/pmpermit.py archive via client.edit_folder(unpack=1)).
-            return Err(Error::Other(
-                "unarchiving all chats requires a binary Responder op (Python: plugins/pmpermit.py archive clear via client.edit_folder(unpack=1))".to_string(),
-            ));
+            // Python: `client.edit_folder(unpack=1)` — unarchive every
+            // dialog. The trait has no whole-folder op, so each archived
+            // dialog is unarchived in turn; failures are counted and
+            // reported instead of aborting the rest.
+            match ctx.responder.dialogs().await {
+                Ok(dialogs) => {
+                    let mut failed = 0usize;
+                    for d in dialogs.iter().filter(|d| d.archived) {
+                        if ctx.responder.set_archived(d.id, false).await.is_err() {
+                            failed += 1;
+                        }
+                    }
+                    if failed == 0 {
+                        ctx.reply("Unarchived all chats").await?;
+                    } else {
+                        ctx.reply(&format!(
+                            "Unarchived all chats except {failed} that failed."
+                        ))
+                        .await?;
+                    }
+                }
+                Err(e) => {
+                    ctx.reply(&format!("`{e}`")).await?;
+                }
+            }
         }
         _ => {
             ctx.reply("Usage: `.startarchive`, `.stoparchive` or `.cleararchive`")
@@ -304,7 +323,7 @@ async fn cmd_archive(ctx: &Ctx) -> Result<()> {
 }
 
 async fn cmd_approve(ctx: &Ctx) -> Result<()> {
-    let user_id = resolve_target(ctx)?;
+    let user_id = resolve_target(ctx).await?;
     if is_dev(ctx, user_id) {
         ctx.reply("Lol, He is my Developer\nHe is auto Approved")
             .await?;
@@ -312,8 +331,11 @@ async fn cmd_approve(ctx: &Ctx) -> Result<()> {
     }
     if approve_user(ctx, user_id).await? {
         delete_pm_warn_msgs(ctx, user_id).await;
-        // TODO(responder-op): move the chat out of the archive
-        // (Python: plugins/pmpermit.py approvepm via ultroid_bot.edit_folder(folder=0)).
+        // Python moves the chat out of the archive (`edit_folder(folder=0)`,
+        // wrapped in try/except pass) — best-effort here too.
+        if let Err(e) = ctx.responder.set_archived(user_id, false).await {
+            tracing::debug!("approve: unarchive of {user_id} failed: {e}");
+        }
         ctx.reply(&format!(
             "<b>{}</b> <code>approved to PM!</code>",
             mention(user_id)
@@ -328,7 +350,7 @@ async fn cmd_approve(ctx: &Ctx) -> Result<()> {
 }
 
 async fn cmd_disapprove(ctx: &Ctx) -> Result<()> {
-    let user_id = resolve_target(ctx)?;
+    let user_id = resolve_target(ctx).await?;
     if is_dev(ctx, user_id) {
         ctx.reply("`Lol, He is my Developer\nHe Can't Be DisApproved.`")
             .await?;
@@ -352,7 +374,7 @@ async fn cmd_disapprove(ctx: &Ctx) -> Result<()> {
 }
 
 async fn cmd_block(ctx: &Ctx) -> Result<()> {
-    let user_id = resolve_target(ctx)?;
+    let user_id = resolve_target(ctx).await?;
     disapprove_user(ctx, user_id).await?;
     // TODO(responder-op): contacts.BlockRequest
     // (Python: plugins/pmpermit.py blockpm via ultroid_bot(BlockRequest(user))).
@@ -370,7 +392,7 @@ async fn cmd_unblock(ctx: &Ctx) -> Result<()> {
             "listing blocked users requires a binary Responder op (Python: plugins/pmpermit.py unblockpm via contacts.GetBlockedRequest)".to_string(),
         ));
     }
-    let user_id = resolve_target(ctx)?;
+    let user_id = resolve_target(ctx).await?;
     // TODO(responder-op): contacts.UnblockRequest
     // (Python: plugins/pmpermit.py unblockpm via client(UnblockRequest(user))).
     let _ = user_id;
@@ -447,8 +469,13 @@ pub async fn handle_incoming_pm(
     if ctx.text == ctx.get_str("pmperm_1") {
         return Ok(IncomingPmAction::Ignored);
     }
-    // TODO(responder-op): archive the chat when MOVE_ARCHIVE is on
-    // (Python: plugins/pmpermit.py permitpm via ultroid_bot.edit_folder(folder=1)).
+    // Python archives the chat when MOVE_ARCHIVE is on
+    // (`edit_folder(folder=1)`, wrapped in try/except) — best-effort here.
+    if is_setting_on(db_get(ctx, "MOVE_ARCHIVE").await.ok().flatten()) {
+        if let Err(e) = ctx.responder.set_archived(ctx.chat_id, true).await {
+            tracing::debug!("permitpm: archiving {} failed: {e}", ctx.chat_id);
+        }
+    }
 
     let warns = pmwarns(ctx).await;
     let state = warn_state().lock().expect("warn state lock");

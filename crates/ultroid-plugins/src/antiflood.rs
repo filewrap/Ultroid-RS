@@ -8,15 +8,15 @@
 //! flood watcher (`NewMessage` listener) and the `anti_<user>_<chat>`
 //! unmute callback are event-driven: the counting + decision logic is
 //! ported as pure helpers (`FloodCounter`, `should_mute`) for the
-//! binary's update loop, and the mute/unmute RPCs are `TODO(responder-op)`
-//! sites.
+//! binary's update loop, and the unmute RPC is wired to `unban_user`.
+//! (The flood-mute half lives in the binary's update loop, not here.)
 
 use crate::util::{def, reg_add};
 use serde_json::Value;
 use std::collections::HashMap;
 use ultroid_core::CommandDef;
 use ultroid_core::db::{db_get_json, db_set_json};
-use ultroid_core::{Ctx, Error, Registry, Result};
+use ultroid_core::{Ctx, Registry, Result};
 
 pub const HELP: &str = " -\n\n- `{i}setflood <integer>`\n    Set flood limit in a chat.\n\n- `{i}remflood`\n    Remove flood limit from a chat.\n\n- `{i}getflood`\n    Get flood limit of a chat.\n";
 
@@ -185,11 +185,9 @@ pub fn parse_anti_payload(payload: &str) -> Option<(i64, i64)> {
 }
 
 /// Unmute a flood-muted user (Python `unmuting`).
-/// The unmute RPC is a client op.
-pub async fn unmute_flooded(_ctx: &Ctx, _user_id: i64, _chat_id: i64) -> Result<()> {
-    // TODO(responder-op): edit_permissions(chat, user, send_messages=True).
-    // Python: plugins/antiflood.py:unmuting.
-    Err(Error::Other(
-        "unmute user (edit_permissions) requires a binary Responder op (Python: plugins/antiflood.py:unmuting)".into(),
-    ))
+/// Python lifts the send ban with `edit_permissions(send_messages=True)`;
+/// `unban_user` clears the banned rights, which lifts it.
+pub async fn unmute_flooded(ctx: &Ctx, user_id: i64, chat_id: i64) -> Result<()> {
+    ctx.responder.unban_user(chat_id, user_id).await?;
+    Ok(())
 }

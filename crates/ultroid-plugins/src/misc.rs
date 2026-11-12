@@ -5,14 +5,18 @@
 //!   uses the `image` crate (grayscale, autocontrast, resize, ramp).
 //!   Text is rasterised with an embedded 5x7 bitmap font (the sandbox
 //!   has no TTF rasteriser in the dependency set); reply-image mode
-//!   needs the replied media downloaded, which is a Responder op.
+//!   downloads the replied media with the `Responder` `download_media`
+//!   op first.
 //! * `.spoil` — spoiler via `<tg-spoiler>` HTML through `reply_html`.
-//! * `.react` / `.effects` / `.effect` / `.loclive` / `.stoplive` /
-//!   `.qr` / `.qrlist` / `.qrsend` — argument parsing, validation and
-//!   state are real; the actual Telegram calls (reactions, effects,
-//!   live locations, quick replies) are raw TL requests with no
-//!   `Responder` equivalent and return the honest `TODO(responder-op)`
-//!   error at their call sites.
+//! * `.effect` / `.loclive` — sent with the `Responder` `send_effect` /
+//!   `send_geo_live` ops (`.loclive` re-using a replied location's
+//!   coordinates is still a TODO — no geo on a fetched message).
+//! * `.react` / `.effects` / `.stoplive` / `.qr` / `.qrlist` /
+//!   `.qrsend` — argument parsing, validation and state are real; the
+//!   actual Telegram calls (reactions, effects list, stopping a live
+//!   location, quick replies) are raw TL requests with no `Responder`
+//!   equivalent and return the honest `TODO(responder-op)` error at
+//!   their call sites.
 
 use image::{DynamicImage, GrayImage, RgbImage};
 use ultroid_core::{Ctx, Error, Registry, Result};
@@ -527,11 +531,48 @@ async fn cmd_ascii(ctx: &Ctx) -> Result<()> {
     let width = opts.width.clamp(20, 200);
     // Image mode: convert a replied photo/sticker to ASCII.
     if ctx.reply_to_id.is_some() {
-        // TODO(responder-op): download the replied message's media
-        // (Python: plugins/misc.py ascii_cmd via reply.download_media()).
-        return Err(Error::Other(
-            "converting a replied image to ASCII requires a binary Responder op (Python: plugins/misc.py ascii_cmd via reply.download_media())".to_string(),
-        ));
+        let status = ctx.reply(&ctx.get_str("com_1")).await?;
+        let reply_id = ctx.reply_to_id.expect("checked above");
+        let dest = std::env::temp_dir().join(format!("ultroid-ascii-dl-{}", rand::random::<u32>()));
+        let path = ctx
+            .responder
+            .download_media(ctx.chat_id, reply_id as i32, &dest)
+            .await?;
+        let img = match image::open(&path) {
+            Ok(img) => img,
+            Err(e) => {
+                let _ = tokio::fs::remove_file(&path).await;
+                ctx.edit(status, &format!("`Cannot read image: {e}`"))
+                    .await?;
+                return Ok(());
+            }
+        };
+        let _ = tokio::fs::remove_file(&path).await;
+        let lines = image_to_ascii(&img, width, &opts.ramp, opts.invert);
+        let art = lines.join("\n");
+        if opts.as_text {
+            send_ascii_text(ctx, status, &art).await?;
+            return Ok(());
+        }
+        let out = ascii_to_image(
+            &lines,
+            if opts.color { Some(&img) } else { None },
+            &opts.ramp,
+        );
+        let Some(out_img) = out else {
+            ctx.edit(status, "`Could not render ASCII art.`").await?;
+            return Ok(());
+        };
+        let out_path = save_temp_png(&out_img)?;
+        let _ = ctx.delete(status).await;
+        let cap = format!(
+            "🎨 **ASCII art**{}",
+            if opts.color { " (coloured)" } else { "" }
+        );
+        let r = ctx.send_file(&out_path, &cap).await;
+        let _ = tokio::fs::remove_file(&out_path).await;
+        r?;
+        return Ok(());
     }
     // Text mode.
     let text = opts.text.clone();
@@ -665,12 +706,11 @@ async fn cmd_effect(ctx: &Ctx) -> Result<()> {
             .await?;
         return Ok(());
     }
-    // TODO(responder-op): send a message with message_effect_id
-    // (Python: plugins/misc.py effect_cmd via send_message(message_effect_id=...)).
-    let _ = (effect_id, text);
-    Err(Error::Other(
-        "sending a message with an effect requires a binary Responder op (Python: plugins/misc.py effect_cmd via send_message(message_effect_id))".to_string(),
-    ))
+    ctx.responder
+        .send_effect(ctx.chat_id, &text, effect_id)
+        .await?;
+    let _ = ctx.delete(ctx.message_id).await;
+    Ok(())
 }
 
 /// Port of `_parse_loclive_args`: `(lat, lon, seconds, note)`.
@@ -740,19 +780,26 @@ async fn cmd_loclive(ctx: &Ctx) -> Result<()> {
             "re-using a replied location's coordinates requires a binary Responder op (Python: plugins/misc.py loclive_cmd via reply.geo)".to_string(),
         ));
     }
-    let parsed = match parse_loclive_args(arg, reply_geo) {
+    let (lat, lon, seconds, note) = match parse_loclive_args(arg, reply_geo) {
         Ok(p) => p,
         Err(e) => {
             ctx.reply(&format!("`{e}`")).await?;
             return Ok(());
         }
     };
-    // TODO(responder-op): send InputMediaGeoLive
-    // (Python: plugins/misc.py loclive_cmd via send_message(file=InputMediaGeoLive)).
-    let _ = parsed;
-    Err(Error::Other(
-        "starting a live location requires a binary Responder op (Python: plugins/misc.py loclive_cmd via send_message(file=InputMediaGeoLive))".to_string(),
-    ))
+    // NOTE: a replied location's coordinates cannot be re-used — the
+    // Responder surface carries no geo on a fetched message (see the
+    // TODO above) — but explicit `<lat>,<long>` starts live sharing.
+    ctx.responder
+        .send_geo_live(ctx.chat_id, lat, lon, seconds as i32)
+        .await?;
+    // Python sends the note as the message text alongside the geo media;
+    // `send_geo_live` carries no text, so a note goes as its own message.
+    if let Some(note) = note {
+        ctx.responder.send_to(ctx.chat_id, &note).await?;
+    }
+    let _ = ctx.delete(ctx.message_id).await;
+    Ok(())
 }
 
 async fn cmd_stoplive(ctx: &Ctx) -> Result<()> {

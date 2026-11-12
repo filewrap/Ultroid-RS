@@ -4,9 +4,8 @@
 //! `GUEST_SESSIONS` maps user id -> {scope, start, expiry} (epoch seconds;
 //! `expiry` is null for indefinite sessions).
 //!
-//! `.guest add|remove|list` is fully ported over the DB. The reply path
-//! needs the replied message's sender, which the `Ctx` surface does not
-//! expose — that path is a `TODO(responder-op)` site. Duration formatting
+//! `.guest add|remove|list` is fully ported over the DB, including the
+//! reply path (sender from `ctx.reply_to_sender_id`). Duration formatting
 //! mirrors Python `custom.fmt.fmtsec(..., part=1, human=True)`.
 
 use crate::util::{def, reg_add};
@@ -35,12 +34,6 @@ fn now_secs() -> f64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs_f64())
         .unwrap_or(0.0)
-}
-
-fn todo_op(op: &str, py: &str) -> Error {
-    Error::Other(format!(
-        "{op} requires a binary Responder op (Python: {py})"
-    ))
 }
 
 /// One guest session (Python `GuestDB` record).
@@ -166,12 +159,13 @@ async fn guest_manager(ctx: &Ctx) -> Result<()> {
 
     // add / remove need a user id.
     let (user_id, expiry_seconds) = if ctx.reply_to_id.is_some() {
-        // TODO(responder-op): get replied message -> sender id.
-        // Python: plugins/guest_manager.py:guest_manager_cmd.
-        return Err(todo_op(
-            "get replied message sender",
-            "plugins/guest_manager.py:guest_manager_cmd",
-        ));
+        // Python: the replied message's sender; the first arg, if any,
+        // is the expiry in seconds (for add).
+        let user_id = ctx.reply_to_sender_id.ok_or_else(|| {
+            Error::Other("could not determine the replied message's sender".to_string())
+        })?;
+        let expiry_seconds = args.first().and_then(|a| a.parse::<i64>().ok());
+        (user_id, expiry_seconds)
     } else {
         if args.is_empty() {
             ctx.reply("❌ **Error**: Please specify a User ID or reply to a user's message.")

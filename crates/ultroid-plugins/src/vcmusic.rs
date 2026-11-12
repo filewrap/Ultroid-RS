@@ -13,21 +13,21 @@
 //! `tokio::process::Command` (search, URL, or bare video id; no fake
 //! results — a failed extraction reports the real cause).
 //!
-//! The actual audio path needs the `ultroid-vc` `Engine` (ntgcalls +
-//! grammers `phone.*` signalling), which lives in the binary — no
-//! `Engine` handle is carried on `Ctx`. Every command does all of its
-//! local work (resolve, queue, state) and then returns an honest
-//! `TODO(responder-op)` error at the exact point the engine join/play/
-//! pause/mute call is needed; the group-call plumbing commands
-//! (`startvc`/`stopvc`/`vctitle`/`vcinvite`) are `phone.*` RPCs and
-//! return the same kind of error after validation. Queue-only commands
-//! (`vqueue`, `vnow`, `vloop`) work fully against the local state.
+//! The audio path reaches the `ultroid-vc` `Engine` (ntgcalls +
+//! grammers `phone.*` signalling) through `Ctx.vc` — the actor handle
+//! the binary hands every `Ctx` (mpsc to the engine thread). Each
+//! command does its local work (resolve, queue, state) and then sends
+//! the matching actor command; when no engine is running (`ctx.vc`
+//! is `None`, e.g. bot-only mode) the command errors honestly instead
+//! of pretending the track is playing. Queue-only commands (`vqueue`,
+//! `vnow`, `vloop`) work fully against the local state.
 
 use crate::util::{def, reg_add};
 use std::sync::OnceLock;
 use tokio::process::Command as ProcCommand;
 use tokio::sync::Mutex;
-use ultroid_core::{ChatType, Ctx, Error, Registry, Result};
+use ultroid_core::vc::{VcHandle, VcTrack};
+use ultroid_core::{ChatType, Ctx, Error, Registry, Result, VcControl};
 use ultroid_vc::dataclass::{CachedTrack, ChannelPlay};
 use ultroid_vc::messages as msg;
 use ultroid_vc::player::{PlayerRegistry, PlayerState};
@@ -139,10 +139,34 @@ fn players() -> &'static Mutex<PlayerRegistry> {
     PLAYERS.get_or_init(|| Mutex::new(PlayerRegistry::new()))
 }
 
-fn vc_op(op: &str) -> Error {
-    Error::Other(format!(
-        "{op} requires a binary Responder op (ultroid-vc Engine / phone.* RPC) (Python: vcmusic.py)"
-    ))
+/// The engine actor handle, or an honest error when the bot runs
+/// without a user/VC client (bot-only mode: no engine thread exists).
+fn vc(ctx: &Ctx) -> Result<VcHandle> {
+    ctx.vc.clone().ok_or_else(|| {
+        Error::Other(
+            "Voice engine is not running — this bot has no user/VC client connected (Python: vcmusic.py)"
+                .to_string(),
+        )
+    })
+}
+
+/// Convert the plugin's `CachedTrack` to the actor's plain-data `VcTrack`.
+fn to_vc_track(t: &CachedTrack) -> VcTrack {
+    let mut vt = VcTrack::new(
+        t.url.clone(),
+        t.name.clone(),
+        t.artist.clone(),
+        t.user.clone(),
+        t.file_path.clone(),
+        t.thumbnail.clone(),
+        t.track_id.clone(),
+        t.duration,
+        t.is_video,
+        t.platform.clone(),
+        t.channel.as_ref().map(|c| (c.chat_id, c.is_channel)),
+    );
+    vt.loop_count = t.loop_count;
+    vt
 }
 
 fn requester(ctx: &Ctx) -> String {
@@ -272,12 +296,11 @@ async fn vplay(ctx: &Ctx) -> Result<()> {
         ctx.reply(&msg::queued_msg(&track.display(), queued_pos, &track.user))
             .await?;
     }
-    // TODO(responder-op): join the group call if needed and start the
-    // audio stream via the ultroid-vc `Engine`
-    // (`Engine::play_media` / `Engine::play_next`) — the queue above is
-    // real local state; the sound itself needs the binary's Engine
-    // handle (Python: vcmusic.py:vplay, `call._play_song`).
-    Err(vc_op("join group call + play via ultroid-vc Engine"))
+    // Start the audio on the engine (joins the group call on first
+    // play; `enqueue` starts immediately when the engine is idle).
+    // Python: vcmusic.py:vplay, `call._play_song`.
+    vc(ctx)?.enqueue(ctx.chat_id, to_vc_track(&track)).await?;
+    Ok(())
 }
 
 async fn vskip(ctx: &Ctx) -> Result<()> {
@@ -298,9 +321,10 @@ async fn vskip(ctx: &Ctx) -> Result<()> {
         ctx.reply(&msg::status_msg(&n.display(), n.duration, &n.user))
             .await?;
     }
-    // TODO(responder-op): start the next track's audio via the
-    // ultroid-vc `Engine` (Python: vcmusic.py:vskip, `call.play_next`).
-    Err(vc_op("play next track via ultroid-vc Engine"))
+    // Start the next track's audio on the engine
+    // (Python: vcmusic.py:vskip, `call.play_next`).
+    vc(ctx)?.play_next(ctx.chat_id).await?;
+    Ok(())
 }
 
 async fn vpause(ctx: &Ctx) -> Result<()> {
@@ -318,9 +342,10 @@ async fn vpause(ctx: &Ctx) -> Result<()> {
     if let Some(t) = track {
         ctx.reply(&msg::paused_msg(&t)).await?;
     }
-    // TODO(responder-op): pause the audio stream via the ultroid-vc
-    // `Engine` (Python: vcmusic.py:vpause, `call.pause`).
-    Err(vc_op("pause via ultroid-vc Engine"))
+    // Pause the audio stream on the engine
+    // (Python: vcmusic.py:vpause, `call.pause`).
+    vc(ctx)?.pause(ctx.chat_id).await?;
+    Ok(())
 }
 
 async fn vresume(ctx: &Ctx) -> Result<()> {
@@ -342,9 +367,10 @@ async fn vresume(ctx: &Ctx) -> Result<()> {
     if let Some(t) = track {
         ctx.reply(&msg::resumed_msg(&t)).await?;
     }
-    // TODO(responder-op): resume the audio stream via the ultroid-vc
-    // `Engine` (Python: vcmusic.py:vresume, `call.resume`).
-    Err(vc_op("resume via ultroid-vc Engine"))
+    // Resume the audio stream on the engine
+    // (Python: vcmusic.py:vresume, `call.resume`).
+    vc(ctx)?.resume(ctx.chat_id).await?;
+    Ok(())
 }
 
 async fn vqueue(ctx: &Ctx) -> Result<()> {
@@ -394,9 +420,10 @@ async fn vclear(ctx: &Ctx) -> Result<()> {
         player.stop();
     }
     ctx.reply(&msg::cleared_msg()).await?;
-    // TODO(responder-op): leave/end the group call via the ultroid-vc
-    // `Engine` (Python: vcmusic.py:vclear, `call.end`).
-    Err(vc_op("end group call via ultroid-vc Engine"))
+    // Leave/end the group call on the engine
+    // (Python: vcmusic.py:vclear, `call.end`).
+    vc(ctx)?.end(ctx.chat_id).await?;
+    Ok(())
 }
 
 async fn vloop(ctx: &Ctx) -> Result<()> {
@@ -436,23 +463,24 @@ async fn vloop(ctx: &Ctx) -> Result<()> {
 
 async fn vcmute(ctx: &Ctx) -> Result<()> {
     ctx.reply(&msg::mute_msg(true)).await?;
-    // TODO(responder-op): mute the stream via the ultroid-vc `Engine`
-    // (Python: vcmusic.py:vcmute, `call.mute`).
-    Err(vc_op("mute via ultroid-vc Engine"))
+    // Mute the stream on the engine (Python: vcmusic.py:vcmute, `call.mute`).
+    vc(ctx)?.mute(ctx.chat_id).await?;
+    Ok(())
 }
 
 async fn vcunmute(ctx: &Ctx) -> Result<()> {
     ctx.reply(&msg::mute_msg(false)).await?;
-    // TODO(responder-op): unmute the stream via the ultroid-vc `Engine`
+    // Unmute the stream on the engine
     // (Python: vcmusic.py:vcunmute, `call.unmute`).
-    Err(vc_op("unmute via ultroid-vc Engine"))
+    vc(ctx)?.unmute(ctx.chat_id).await?;
+    Ok(())
 }
 
 async fn startvc(ctx: &Ctx) -> Result<()> {
-    // TODO(responder-op): phone.CreateGroupCallRequest(chat)
-    // (Python: vcmusic.py:startvc).
-    let _ = ctx;
-    Err(vc_op("phone.CreateGroupCallRequest"))
+    // phone.CreateGroupCallRequest(chat) (Python: vcmusic.py:startvc).
+    ctx.responder.create_group_call(ctx.chat_id).await?;
+    ctx.reply("Voice chat created.").await?;
+    Ok(())
 }
 
 async fn stopvc(ctx: &Ctx) -> Result<()> {
@@ -460,9 +488,10 @@ async fn stopvc(ctx: &Ctx) -> Result<()> {
         let mut reg = players().lock().await;
         reg.remove(ctx.chat_id);
     }
-    // TODO(responder-op): phone.DiscardGroupCallRequest(call)
-    // (Python: vcmusic.py:stopvc).
-    Err(vc_op("phone.DiscardGroupCallRequest"))
+    // phone.DiscardGroupCallRequest(call) (Python: vcmusic.py:stopvc).
+    ctx.responder.discard_group_call(ctx.chat_id).await?;
+    ctx.reply("Voice chat ended.").await?;
+    Ok(())
 }
 
 async fn vctitle(ctx: &Ctx) -> Result<()> {
@@ -471,17 +500,30 @@ async fn vctitle(ctx: &Ctx) -> Result<()> {
         ctx.reply(&ctx.get_str("vct_6")).await?;
         return Ok(());
     }
-    // TODO(responder-op): phone.EditGroupCallTitleRequest(call, title)
+    // phone.EditGroupCallTitleRequest(call, title)
     // (Python: vcmusic.py:vctitle).
-    Err(vc_op(&format!(
-        "phone.EditGroupCallTitleRequest(title={title})"
-    )))
+    ctx.responder
+        .edit_group_call_title(ctx.chat_id, title)
+        .await?;
+    ctx.reply("Voice chat title updated.").await?;
+    Ok(())
 }
 
 async fn vcinvite(ctx: &Ctx) -> Result<()> {
     let _id = ctx.reply(&ctx.get_str("vct_3")).await?;
-    // TODO(responder-op): iterate non-bot participants and
-    // phone.InviteToGroupCallRequest(call, users) in batches of 6
-    // (Python: vcmusic.py:vcinvite).
-    Err(vc_op("phone.InviteToGroupCallRequest"))
+    // Invite every non-bot participant (Python: vcmusic.py:vcinvite;
+    // the Responder batches 6 per call).
+    let (participants, _total) = ctx.responder.participants(ctx.chat_id, 200, 0).await?;
+    let ids: Vec<i64> = participants
+        .iter()
+        .filter(|p| !p.user.bot)
+        .map(|p| p.user.id)
+        .collect();
+    if ids.is_empty() {
+        ctx.reply("No members to invite.").await?;
+        return Ok(());
+    }
+    ctx.responder.invite_to_group_call(ctx.chat_id, ids).await?;
+    ctx.reply("Invites sent.").await?;
+    Ok(())
 }

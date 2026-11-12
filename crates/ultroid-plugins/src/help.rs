@@ -12,9 +12,8 @@
 //! table/expandable blocks, which plain HTML cannot carry).
 //!
 //! Bare `.help` is delivered as an inline result from the assistant bot
-//! (Python: `client.inline_query(asst, "ultd")` + click result 0) —
-//! that needs an assistant inline-query op on `Responder` (see the
-//! TODO(responder-op) in `help` below). The paged help-menu callbacks
+//! (Python: `client.inline_query(asst, "ultd")` + click result 0) — see
+//! `help` below. The paged help-menu callbacks
 //! (`help_menu`, `plugin`, `ownr`, `close`) are assistant-bot callback
 //! handlers (see `plugins::inline` + the assistant crate).
 
@@ -326,13 +325,18 @@ async fn help(ctx: &Ctx) -> Result<()> {
         }
         return ctx.edit_html(ctx.message_id, &out).await;
     }
-    // Bare `.help` is delivered as an inline result from the assistant bot.
-    // TODO(responder-op): assistant-bot inline query "ultd" + click result
-    Err(Error::Other(
-        "bare `.help` needs an assistant-bot inline query ('ultd') + click; \
-         requires a binary Responder op (Python: _help.py:_help)"
-            .to_string(),
-    ))
+    // Bare `.help` is delivered as an inline result from the assistant bot
+    // (Python: `client.inline_query(asst, "ultd")` + click result 0).
+    let Some(asst_id) = ctx.asst_dialog_id else {
+        return Err(Error::Other(
+            "bare `.help` needs the assistant bot to be connected (inline query 'ultd' + click) (Python: _help.py:_help)"
+                .to_string(),
+        ));
+    };
+    ctx.responder
+        .inline_query_click(asst_id, "ultd", ctx.chat_id, None)
+        .await?;
+    Ok(())
 }
 
 pub fn register(registry: &mut Registry) {

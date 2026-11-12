@@ -11,15 +11,16 @@
 //! dedup, per-chat (6/min) and per-bot (12/min) rate limits. Config is
 //! persisted under DB key `B2B_CONFIG`.
 //!
-//! What needs the client: resolving a `@username` to a peer, and every
-//! actual send — the opening message and each generated reply go out
-//! through the *assistant bot* client, which the `Responder` surface
-//! does not expose. Those are `TODO(responder-op)` sites: the session
-//! bookkeeping runs, then the send step returns the honest error (and
-//! the session is stopped again, exactly like the Python version does
-//! on send failure). The incoming-message handler (`on_b2b_message`)
-//! must be called by the binary's NewMessage path for bot senders —
-//! `Registry` has no listener surface.
+//! What needs the client: resolving a `@username` to a peer (wired via
+//! `resolve_user`), and every actual send — the opening message and each
+//! generated reply go out through the *assistant bot* responder
+//! (`send_to`; the trait has no rich-send-to or reply-to send, so they
+//! go out as plain text with no reply reference). When the assistant is
+//! not connected those sends return an honest error (and the session is
+//! stopped again, exactly like the Python version does on send
+//! failure). The incoming-message handler (`on_b2b_message`) must be
+//! called by the binary's NewMessage path for bot senders — `Registry`
+//! has no listener surface.
 
 use crate::genai;
 use crate::util::{db_get, db_set, def, reg_add};
@@ -28,7 +29,7 @@ use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::sync::OnceLock;
 use std::time::Instant;
 use tokio::sync::Mutex;
-use ultroid_core::{ChatType, Ctx, Error, Registry, Result, RichDoc};
+use ultroid_core::{ChatType, Ctx, Error, Registry, Result};
 
 pub const CONFIG_KEY: &str = "B2B_CONFIG";
 pub const WINDOW_SECONDS: u64 = 60;
@@ -477,18 +478,15 @@ async fn b2b_toggle(ctx: &Ctx) -> Result<()> {
     Ok(())
 }
 
-/// Resolve a `@bot` reference to a numeric id; usernames need a client
-/// `get_entity` call.
-fn resolve_bot_ref(reference: &str) -> std::result::Result<i64, Error> {
-    reference
-        .trim()
-        .trim_start_matches('@')
-        .parse::<i64>()
-        .map_err(|_| {
-            Error::Other(format!(
-                "resolve bot '{reference}' requires a binary Responder op (Python: bot2bot.py:_resolve_bot)"
-            ))
-        })
+/// Resolve a `@bot` reference to a numeric id (and its username, when
+/// known) — `resolve_user` for `@name`s, a plain parse for numeric ids.
+async fn resolve_bot_ref(ctx: &Ctx, reference: &str) -> Result<(i64, Option<String>)> {
+    let trimmed = reference.trim().trim_start_matches('@');
+    if let Ok(id) = trimmed.parse::<i64>() {
+        return Ok((id, None));
+    }
+    let user = ctx.responder.resolve_user(reference).await?;
+    Ok((user.id, user.username))
 }
 
 async fn b2b_access(ctx: &Ctx) -> Result<()> {
@@ -500,7 +498,7 @@ async fn b2b_access(ctx: &Ctx) -> Result<()> {
     }
     let action = parts[1].as_str();
     let reference = parts[2].as_str();
-    let bot_id = resolve_bot_ref(reference)?;
+    let (bot_id, _) = resolve_bot_ref(ctx, reference).await?;
     if !bot_client_ready(ctx) {
         ctx.reply("No assistant bot is configured; set BOT_TOKEN first.")
             .await?;
@@ -525,18 +523,26 @@ async fn b2b_access(ctx: &Ctx) -> Result<()> {
     let is_group = matches!(ctx.chat_type, ChatType::Group | ChatType::Supergroup);
     let group_id = if is_group {
         // The Python version requires the command to be a reply to the
-        // peer bot's own message in that group; the replied sender is not
-        // visible on `Ctx`, so that verification cannot run here.
-        // TODO(responder-op): resolve the replied message's sender and
-        // verify it is the peer bot (Python: bot2bot.py:b2b_access).
+        // peer bot's own message in that group; the replied sender comes
+        // from `ctx.reply_to_sender_id`.
         if ctx.reply_to_id.is_none() {
             ctx.reply("In a group, run this command as a reply to the peer bot's message.")
                 .await?;
             return Ok(());
         }
-        return Err(Error::Other(
-            "verify replied message sender is the peer bot requires a binary Responder op (Python: bot2bot.py:b2b_access)".to_string(),
-        ));
+        match ctx.reply_to_sender_id {
+            Some(sender_id) if sender_id == bot_id => Some(ctx.chat_id),
+            Some(_) => {
+                ctx.reply("In a group, run this command as a reply to the peer bot's message.")
+                    .await?;
+                return Ok(());
+            }
+            None => {
+                return Err(Error::Other(
+                    "could not determine the replied message's sender".into(),
+                ));
+            }
+        }
     } else {
         None
     };
@@ -568,7 +574,7 @@ async fn b2b_session(ctx: &Ctx) -> Result<()> {
     }
     let action = parts[1].as_str();
     let reference = parts[2].as_str();
-    let bot_id = resolve_bot_ref(reference)?;
+    let (bot_id, username) = resolve_bot_ref(ctx, reference).await?;
     if !bot_client_ready(ctx) {
         ctx.reply("No assistant bot is configured; set BOT_TOKEN first.")
             .await?;
@@ -629,26 +635,36 @@ async fn b2b_session(ctx: &Ctx) -> Result<()> {
                 .await?;
             return Ok(());
         }
-        if let Err(e) = m.start(bot_id, chat_id, None) {
+        if let Err(e) = m.start(bot_id, chat_id, username) {
             ctx.reply(&e).await?;
             return Ok(());
         }
     }
-    let _opening = opening.chars().take(MAX_PEER_TEXT).collect::<String>();
-    // TODO(responder-op): send the opening message as the assistant bot
-    // (rich) to `chat_id`, replying to the group message when in a group
-    // (Python: bot2bot.py:b2b_session, `send_rich(asst, chat_id, ...)`).
-    // The session is stopped again on send failure, exactly like Python.
-    let mut m = manager().lock().await;
-    m.stop(bot_id, chat_id);
-    let scope = if is_group {
-        format!(" in group {chat_id}")
-    } else {
-        " in private chat".to_string()
+    let opening: String = opening.chars().take(MAX_PEER_TEXT).collect();
+    // Send the opening message as the assistant bot (Python:
+    // `send_rich(asst, chat_id, ...)`). The trait has no rich-send-to or
+    // reply-to send, so this goes out as plain text with no reply
+    // reference. The session is stopped again on send failure, exactly
+    // like Python.
+    let Some(asst) = ctx.asst.clone() else {
+        let mut m = manager().lock().await;
+        m.stop(bot_id, chat_id);
+        return Err(Error::Other(
+            "sending the opening message requires the assistant bot to be connected".into(),
+        ));
     };
-    Err(Error::Other(format!(
-        "send opening message via assistant bot to bot {bot_id}{scope} requires a binary Responder op (Python: bot2bot.py:b2b_session)"
-    )))
+    match asst.send_to(chat_id, &opening).await {
+        Ok(sent_id) => {
+            let mut m = manager().lock().await;
+            m.record_outbound(bot_id, chat_id, sent_id);
+            Ok(())
+        }
+        Err(e) => {
+            let mut m = manager().lock().await;
+            m.stop(bot_id, chat_id);
+            Err(e)
+        }
+    }
 }
 
 /// Generate one bounded reply for a peer-bot message (Python
@@ -677,7 +693,7 @@ async fn generate_reply(ctx: &Ctx, peer_text: &str, peer_name: &str) -> Result<O
 /// Incoming-message handler (Python `bot2bot.py:_on_b2b_message`).
 /// Call from the binary's NewMessage path for messages sent by a bot
 /// (`sender_is_bot = true`) with the sender's username. The reply send
-/// is a `TODO(responder-op)` (assistant-bot client send).
+/// goes out through the assistant responder (see below).
 pub async fn on_b2b_message(
     ctx: &Ctx,
     sender_is_bot: bool,
@@ -727,28 +743,37 @@ pub async fn on_b2b_message(
     if !m.is_active(bot_id, chat_id) {
         return Ok(());
     }
-    // TODO(responder-op): send the generated reply as the assistant bot
-    // (rich), replying to the peer message, and record the outbound id
-    // (Python: bot2bot.py:_on_b2b_message, `send_rich(asst, ...)` +
-    // `b2b.record_outbound(...)`). On failure the session is stopped.
-    let _ = response;
-    m.stop(bot_id, chat_id);
-    Err(Error::Other(format!(
-        "send B2B reply via assistant bot to bot {bot_id} requires a binary Responder op (Python: bot2bot.py:_on_b2b_message)"
-    )))
+    drop(m);
+    // Send the generated reply as the assistant bot (Python:
+    // `send_rich(asst, ...)` + `b2b.record_outbound(...)`). The trait
+    // has no rich-send-to or reply-to send, so this goes out as plain
+    // text with no reply reference. On failure the session is stopped.
+    let Some(asst) = ctx.asst.clone() else {
+        let mut m = manager().lock().await;
+        m.stop(bot_id, chat_id);
+        return Err(Error::Other(
+            "sending the B2B reply requires the assistant bot to be connected".into(),
+        ));
+    };
+    match asst.send_to(chat_id, &response).await {
+        Ok(sent_id) => {
+            let mut m = manager().lock().await;
+            m.record_outbound(bot_id, chat_id, sent_id);
+            Ok(())
+        }
+        Err(e) => {
+            let mut m = manager().lock().await;
+            m.stop(bot_id, chat_id);
+            Err(e)
+        }
+    }
 }
 
 /// Owner notice (Python `bot2bot.py:_owner_notice`): rich to the owner
-/// when possible, else plain. Sending to an arbitrary peer needs a
-/// client op.
+/// when possible, else plain, sent with the user client. The trait has
+/// no rich-send-to, so this goes out as plain text. Python swallows
+/// notification failures (log only), so a failed notice is `Ok(())`.
 pub async fn owner_notice(ctx: &Ctx, text: &str) -> Result<()> {
-    let _ = ctx;
-    let doc = RichDoc::markdown(text)?;
-    let _ = doc;
-    // TODO(responder-op): send `text` to the owner id (Python:
-    // bot2bot.py:_owner_notice).
-    Err(Error::Other(
-        "send owner notice requires a binary Responder op (Python: bot2bot.py:_owner_notice)"
-            .to_string(),
-    ))
+    let _ = ctx.responder.send_to(ctx.config.owner_id, text).await;
+    Ok(())
 }

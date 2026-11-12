@@ -7,7 +7,7 @@
 //! `Responder` surface (see the `TODO(responder-op)` below).
 
 use crate::util::{def, reg_add};
-use ultroid_core::{Ctx, Error, Registry, Result};
+use ultroid_core::{Ctx, Registry, Result};
 
 pub fn register(registry: &mut Registry) {
     let mut d = def(
@@ -83,11 +83,9 @@ async fn schedule(ctx: &Ctx) -> Result<()> {
         ctx.reply(&ctx.get_str("schdl_2")).await?;
         return Ok(());
     }
-    // TODO(responder-op): send `text` to this chat scheduled `delay`
-    // seconds from now (Python: schedulemsg.py, `send_message(...,
-    // schedule=timedelta(seconds=...))`).
+    ctx.responder
+        .send_scheduled(ctx.chat_id, &text, delay)
+        .await?;
     ctx.reply(&ctx.get_str("schdl_1")).await?;
-    Err(Error::Other(format!(
-        "scheduled send in {delay}s requires a binary Responder op (Python: schedulemsg.py:_)"
-    )))
+    Ok(())
 }

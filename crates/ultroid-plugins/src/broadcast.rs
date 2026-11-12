@@ -7,14 +7,14 @@
 //!
 //! What cannot be expressed through `Ctx` in this wave:
 //! * `.addch all` enumerates dialogs (`client.get_dialogs()` filtered to
-//!   broadcast channels the account admins) — no dialog-listing op.
-//! * `.listchannels` resolves each id to a display name via
-//!   `get_entity` — no entity-fetch op, so ids are listed as-is.
-//! * `.forward` / `.broadcast` forward or re-send the replied message into
-//!   every stored channel — no send/forward-to-arbitrary-chat op and no
-//!   replied-message fetch. The validation and counting logic around the
-//!   send loop is implemented; the send itself is the `TODO(responder-op)`
-//!   site.
+//!   broadcast channels the account admins) — `dialogs()` carries no
+//!   admin/creator flag, so that filter cannot be reproduced; the branch
+//!   stays an honest error.
+//! * `.broadcast` re-sends the replied message's text via `send_to`;
+//!   a media reply cannot be re-sent through the trait, so it errors
+//!   before anything is sent. `.forward` forwards the replied message
+//!   into every stored channel with the same per-channel counting and
+//!   log-channel failure notes Python has.
 
 use crate::util::{def, reg_add};
 use ultroid_core::db::{db_get_json, db_set_json};
@@ -138,9 +138,19 @@ async fn listchannels(ctx: &Ctx) -> Result<()> {
     }
     let mut msg = String::from("Channels in database:\n");
     for channel in &list {
-        // TODO(responder-op): get_entity(channel) for the display name
-        // (Python: broadcast.py:list_all).
-        msg.push_str(&format!("=> **{channel}** [`{channel}`]\n"));
+        // Display name via chat_info; fall back to the id alone when the
+        // channel cannot be resolved.
+        let title = ctx
+            .responder
+            .chat_info(*channel)
+            .await
+            .map(|c| c.title)
+            .unwrap_or_default();
+        if title.is_empty() {
+            msg.push_str(&format!("=> **{channel}** [`{channel}`]\n"));
+        } else {
+            msg.push_str(&format!("=> **{title}** [`{channel}`]\n"));
+        }
     }
     msg.push_str(&format!("\nTotal {} channels.", list.len()));
     if msg.len() > 4096 {
@@ -159,9 +169,9 @@ async fn listchannels(ctx: &Ctx) -> Result<()> {
 
 /// `.forward` — port of `broadcast.py::forw`. Requires a replied message.
 async fn forward(ctx: &Ctx) -> Result<()> {
-    if ctx.reply_to_id.is_none() {
+    let Some(reply_id) = ctx.reply_to_id else {
         return ctx.reply(&ctx.get_str("ex_1")).await.map(|_| ());
-    }
+    };
     let list = channels(ctx).await?;
     let x = ctx.reply("Sending...").await?;
     if list.is_empty() {
@@ -170,22 +180,52 @@ async fn forward(ctx: &Ctx) -> Result<()> {
             .await
             .map(|_| ());
     }
-    // TODO(responder-op): forward the replied message to each channel id
-    // (Python: broadcast.py:forw -> ultroid_bot.forward_messages).
-    let _ = x;
-    Err(todo_op(
-        "forward replied message to stored channel ids",
-        "broadcast.py:forw",
-    ))
+    // Python `forw`: forward into each channel, editing the progress
+    // line after each one; a per-channel failure is reported to
+    // LOG_CHANNEL (best-effort here) and counted, not fatal.
+    let mut sent_count = 0usize;
+    let mut error_count = 0usize;
+    for channel in &list {
+        match ctx
+            .responder
+            .forward_to(ctx.chat_id, reply_id as i32, *channel)
+            .await
+        {
+            Ok(_) => sent_count += 1,
+            Err(_) => {
+                error_count += 1;
+                if ctx.config.log_channel != 0 {
+                    let _ = ctx
+                        .responder
+                        .send_to(
+                            ctx.config.log_channel,
+                            &format!("Error in sending at {channel}."),
+                        )
+                        .await;
+                }
+            }
+        }
+        ctx.edit(
+            x,
+            &format!(
+                "Sent : {sent_count}\nError : {error_count}\nTotal : {}",
+                list.len()
+            ),
+        )
+        .await?;
+    }
+    Ok(())
 }
 
 /// `.broadcast` — port of `broadcast.py::sending`. Requires a replied
-/// message; polls must go through `.forward`.
+/// message; polls must go through `.forward` (a poll in the reply cannot
+/// be detected — `message_summary` carries no poll flag — so the
+/// Python poll guard is not reproduced here).
 async fn broadcast(ctx: &Ctx) -> Result<()> {
     let x = ctx.reply(&ctx.get_str("com_1")).await?;
-    if ctx.reply_to_id.is_none() {
+    let Some(reply_id) = ctx.reply_to_id else {
         return ctx.edit(x, &ctx.get_str("ex_1")).await.map(|_| ());
-    }
+    };
     let list = channels(ctx).await?;
     if list.is_empty() {
         return ctx
@@ -193,15 +233,57 @@ async fn broadcast(ctx: &Ctx) -> Result<()> {
             .await
             .map(|_| ());
     }
-    // TODO(responder-op): send the replied message to each channel id
-    // (Python: broadcast.py:sending -> ultroid_bot.send_message(channel,
-    // previous_message)). Only the replied text is visible here
-    // (`reply_to_text`); media/polls need the full message object.
-    let _ = x;
-    Err(todo_op(
-        "send replied message to stored channel ids",
-        "broadcast.py:sending",
-    ))
+    // Python sends the full replied message object (text + media) into
+    // each channel. Only the text is reachable through the trait, so a
+    // media reply is an honest error before anything is sent.
+    let Some(summary) = ctx
+        .responder
+        .message_summary(ctx.chat_id, reply_id as i32)
+        .await?
+    else {
+        return Err(Error::Other(
+            "the replied message is no longer available".into(),
+        ));
+    };
+    if summary.has_media {
+        return Err(Error::Other(
+            "broadcasting a media message requires a binary Responder op (Python: broadcast.py:sending)".to_string(),
+        ));
+    }
+    if summary.text.is_empty() {
+        return Err(Error::Other(
+            "the replied message has no text to broadcast".into(),
+        ));
+    }
+    ctx.edit(x, "Sending....").await?;
+    let mut sent_count = 0usize;
+    let mut error_count = 0usize;
+    for channel in &list {
+        match ctx.responder.send_to(*channel, &summary.text).await {
+            Ok(_) => sent_count += 1,
+            Err(e) => {
+                error_count += 1;
+                if ctx.config.log_channel != 0 {
+                    let _ = ctx
+                        .responder
+                        .send_to(
+                            ctx.config.log_channel,
+                            &format!("Error in sending at {channel}.\n\n{e}"),
+                        )
+                        .await;
+                }
+            }
+        }
+        ctx.edit(
+            x,
+            &format!(
+                "Sent : {sent_count}\nError : {error_count}\nTotal : {}",
+                list.len()
+            ),
+        )
+        .await?;
+    }
+    Ok(())
 }
 
 pub fn register(registry: &mut Registry) {

@@ -9,9 +9,10 @@
 //! — name/username history via @SangMata_beta_bot. `.shorturl <url>`
 //! — TinyURL shorten / expand (real HTTP).
 //!
-//! The Telegram-client steps (participant listing, media download,
-//! bot conversations, username resolution) are `TODO(responder-op)`
-//! sites; everything else is real.
+//! The Telegram-client steps that have no `Responder` equivalent —
+//! downloading media for `.circle`, and the live conversation with
+//! @SangMata_beta_bot — are `TODO(responder-op)` sites; participant
+//! listing and username resolution are wired through the `Responder`.
 
 use crate::util::{def, reg_add};
 use regex::Regex;
@@ -163,12 +164,9 @@ async fn translate(ctx: &Ctx, _telegram: bool) -> Result<()> {
 async fn show_id(ctx: &Ctx) -> Result<()> {
     let arg = ctx.args.trim();
     if !arg.is_empty() {
-        let Ok(ids) = arg.trim_start_matches('@').parse::<i64>() else {
-            // TODO(responder-op): client.parse_id for usernames
-            // (Python: tools.py:_, `event.client.parse_id(match)`).
-            return Err(Error::Other(format!(
-                "resolve '{arg}' to an id requires a binary Responder op (Python: tools.py:_)"
-            )));
+        let ids = match arg.trim_start_matches('@').parse::<i64>() {
+            Ok(id) => id,
+            Err(_) => ctx.responder.resolve_user(arg).await?.id,
         };
         ctx.reply(&format!(
             "**Chat ID:**  `{}`\n**User ID:**  `{ids}`",
@@ -190,13 +188,57 @@ async fn show_id(ctx: &Ctx) -> Result<()> {
 }
 
 async fn bots(ctx: &Ctx) -> Result<()> {
-    let _input = ctx.args.trim();
-    // TODO(responder-op): iterate participants with the bots filter
-    // (Python: tools.py:_, `iter_participants(chat,
-    // filter=ChannelParticipantsBots)`).
-    Err(Error::Other(
-        "list chat bots requires a binary Responder op (Python: tools.py:_)".to_string(),
-    ))
+    let input = ctx.args.trim();
+    // NOTE: `resolve_user` only resolves users; a group/channel
+    // username argument cannot be resolved to a chat id on the
+    // `Responder` surface, so only a numeric chat id (or this chat)
+    // is accepted here.
+    let (chat, chat_label) = if input.is_empty() {
+        (ctx.chat_id, String::new())
+    } else {
+        match input.trim_start_matches('@').parse::<i64>() {
+            Ok(id) => (id, format!(" in **{input}**")),
+            Err(_) => match ctx.responder.resolve_user(input).await {
+                Ok(u) => (u.id, format!(" in **{input}**")),
+                Err(e) => {
+                    ctx.reply(&format!("`{e}`")).await?;
+                    return Ok(());
+                }
+            },
+        }
+    };
+    let mut mentions = format!("• **Bots in this Chat{chat_label}**: \n");
+    // Page through participants (recent filter) and keep the bots —
+    // the `Responder` surface has no bots-only filter.
+    let mut count = 0usize;
+    let mut offset = 0i32;
+    loop {
+        let (page, total) = ctx.responder.participants(chat, 200, offset).await?;
+        if page.is_empty() {
+            break;
+        }
+        for p in &page {
+            if !p.user.bot {
+                continue;
+            }
+            count += 1;
+            let mention = format!("[{}](tg://user?id={})", p.user.first_name, p.user.id);
+            if p.admin || p.owner {
+                mentions.push_str(&format!("\n⚜️ {mention} `{}`", p.user.id));
+            } else {
+                mentions.push_str(&format!("\n• {mention} `{}`", p.user.id));
+            }
+        }
+        offset += page.len() as i32;
+        if offset >= total {
+            break;
+        }
+    }
+    if count == 0 {
+        mentions.push_str("\n`No bots found in this chat.`");
+    }
+    ctx.reply(&mentions).await?;
+    Ok(())
 }
 
 async fn hidden_link(ctx: &Ctx) -> Result<()> {
@@ -440,28 +482,37 @@ async fn sangmata(ctx: &Ctx) -> Result<()> {
     let user = if !user_arg.trim().is_empty() {
         user_arg.trim().to_string()
     } else if ctx.reply_to_id.is_some() {
-        // The replied message's *sender* id is not visible on `Ctx` —
-        // only the replied message id. Resolving it needs a client op.
-        // TODO(responder-op): get the replied message and resolve its
-        // sender (Python: tools.py:sangmata, `reply.sender_id`).
-        return Err(Error::Other(
-            "resolve replied message sender requires a binary Responder op (Python: tools.py:sangmata)".to_string(),
-        ));
+        match ctx.reply_to_sender_id {
+            Some(id) => id.to_string(),
+            None => {
+                ctx.reply("`Reply to a user's message or provide their ID/username to fetch name/username history.`")
+                    .await?;
+                return Ok(());
+            }
+        }
     } else {
         ctx.reply("`Reply to a user's message or provide their ID/username to fetch name/username history.`")
             .await?;
         return Ok(());
     };
     let _id = ctx.reply("`Processing...`").await?;
-    // The reply target's *sender* id is not visible on `Ctx`; a numeric
-    // token is the only resolvable form here.
-    let Ok(user_id) = user.trim_start_matches('@').parse::<i64>() else {
-        // TODO(responder-op): client.get_entity(username) + a live
-        // conversation with @SangMata_beta_bot (send id, collect replies)
-        // (Python: tools.py:sangmata).
-        return Err(Error::Other(format!(
-            "resolve user '{user}' + SangMata conversation requires a binary Responder op (Python: tools.py:sangmata)"
-        )));
+    // A numeric token resolves directly; a username resolves through
+    // the `Responder` (the SangMata conversation itself is still a
+    // TODO — bot conversations are not on the surface).
+    let user_id = match user.trim_start_matches('@').parse::<i64>() {
+        Ok(id) => id,
+        Err(_) => match ctx
+            .responder
+            .resolve_user(user.trim_start_matches('@'))
+            .await
+        {
+            Ok(u) => u.id,
+            Err(e) => {
+                return Err(Error::Other(format!(
+                    "resolve user '{user}' requires a binary Responder op (Python: tools.py:sangmata): {e}"
+                )));
+            }
+        },
     };
     let _ = (cmd, user_id);
     // TODO(responder-op): conversation with @SangMata_beta_bot — send the

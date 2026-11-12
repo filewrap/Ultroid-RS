@@ -16,8 +16,9 @@
 //!   surface in the plugin crate, so they cannot be installed here. (In
 //!   Python `.afk` installs them and they are also installed at import
 //!   time when `AFK_DB` is already set.)
-//! * The log-channel copy (`asst.send_message(LOG_CHANNEL, …)`) needs a
-//!   send-to-arbitrary-chat op; it is logged instead of failing the command.
+//! * The log-channel copy (`asst.send_message(LOG_CHANNEL, …)`) goes out
+//!   through the assistant responder when connected, and is skipped with
+//!   a debug log when it is not.
 
 use crate::util::reg_add;
 use chrono::{NaiveDateTime, Utc};
@@ -106,13 +107,20 @@ async fn set_afk(ctx: &Ctx) -> Result<()> {
     };
     let id = ctx.reply(&msg).await?;
     if ctx.config.log_channel != 0 {
-        // TODO(responder-op): assistant send of the AFK notice to
-        // LOG_CHANNEL (Python: afk.py:set_afk -> asst.send_message).
-        tracing::debug!(
-            log_channel = ctx.config.log_channel,
-            afk_msg_id = id,
-            "afk: log-channel copy needs a send-to-chat Responder op"
-        );
+        // Log-channel copy via the assistant bot (Python:
+        // afk.py:set_afk -> asst.send_message(LOG_CHANNEL, …)).
+        match &ctx.asst {
+            Some(asst) => {
+                asst.send_to(ctx.config.log_channel, &msg).await?;
+            }
+            None => {
+                tracing::debug!(
+                    log_channel = ctx.config.log_channel,
+                    afk_msg_id = id,
+                    "afk: assistant not connected; log-channel copy skipped"
+                );
+            }
+        }
     }
     Ok(())
 }

@@ -12,12 +12,11 @@
 //! binary surfaces as an honest error naming the binary.
 //!
 //! The one gate is the Telegram side: downloading the replied video
-//! (`_download_video` / `fast_downloader`) and, for `.vmerge` /
-//! `.vconcat`, listing the account's recent own videos are binary
-//! Responder operations. Each handler validates its arguments for real
-//! first, then fails honestly at that download point
+//! (`_download_video`) now goes through the Responder (`download_media`),
+//! while listing the account's recent own videos for `.vmerge` /
+//! `.vconcat` still has no Responder op and fails honestly at that point
 //! (`TODO(responder-op)`); the ffmpeg + upload code after it is real and
-//! runs unchanged once the op is wired. Uploads go through
+//! runs unchanged. Uploads go through
 //! `Ctx::send_file` (the `fast_uploader` progress/attributes/thumb
 //! options have no `Ctx` equivalent and are not faked).
 //!
@@ -334,13 +333,13 @@ async fn need_video_reply(ctx: &Ctx, title: &str) -> Result<Option<PathBuf>> {
             .await?;
         return Ok(None);
     }
-    // TODO(responder-op): download the replied video
-    // (`event.client.fast_downloader(reply.document, ...)` — Python:
-    // videotools.py:_download_video).
-    Err(Error::Other(
-        "download replied video file requires a binary Responder op (Python: videotools.py:_download_video)"
-            .to_string(),
-    ))
+    let reply_id = ctx.reply_to_id.unwrap_or(0);
+    let dest = std::env::temp_dir().join(format!("ultroid-video-{}", uuid::Uuid::new_v4()));
+    let path = ctx
+        .responder
+        .download_media(ctx.chat_id, reply_id as i32, &dest)
+        .await?;
+    Ok(Some(path))
 }
 
 /// `.vmerge` / `.vconcat`: the account's recent own videos in this chat

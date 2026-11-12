@@ -42,15 +42,33 @@ fn key(chat_id: i64, word: &str) -> String {
 
 async fn addnote(ctx: &Ctx) -> Result<()> {
     let word = ctx.args.trim().to_lowercase().replace('#', "");
-    let Some(reply_text) = ctx.reply_to_text.clone() else {
-        if ctx.reply_to_id.is_some() {
-            // TODO(responder-op): download the replied message's media
-            // (telegraph upload for pics/gifs/videos, bot file id otherwise)
-            // (Python: notes.py:an).
-            return Err(Error::Other(
-                "download replied media for a note requires a binary Responder op (Python: notes.py:an)".to_string(),
-            ));
-        }
+    // The reply text is on `Ctx` when the binary filled it; otherwise
+    // re-fetch the reply through `message_summary`. A media-only reply
+    // still needs the media-kind branch (Telegraph upload for
+    // pics/gifs/videos, bot file id otherwise), which no trait op
+    // provides, so it stays an honest error.
+    let reply_text: Option<String> = match ctx.reply_to_text.clone() {
+        Some(text) => Some(text),
+        None => match ctx.reply_to_id {
+            Some(reply_id) => {
+                match ctx
+                    .responder
+                    .message_summary(ctx.chat_id, reply_id as i32)
+                    .await?
+                {
+                    Some(summary) if !summary.text.is_empty() => Some(summary.text),
+                    Some(summary) if summary.has_media => {
+                        return Err(Error::Other(
+                            "download replied media for a note requires a binary Responder op (media kind + Telegraph upload / bot file id) (Python: notes.py:an)".to_string(),
+                        ));
+                    }
+                    _ => None,
+                }
+            }
+            None => None,
+        },
+    };
+    let Some(reply_text) = reply_text else {
         ctx.reply(&ctx.get_str("notes_1")).await?;
         return Ok(());
     };
@@ -127,11 +145,11 @@ pub async fn check_notes(ctx: &Ctx) -> Result<bool> {
             continue;
         };
         if entry.button.is_some() {
-            // TODO(responder-op): send the stored note with its inline
-            // buttons (Python: notes.py:notes, `something(...)`).
-            return Err(Error::Other(
-                "send note with inline buttons requires a binary Responder op (Python: notes.py:notes)".to_string(),
-            ));
+            // Stored note with inline buttons — delivered directly with
+            // `send_markup_to` (see filter.rs `check_filter`).
+            if crate::filter::send_with_buttons(ctx, &entry).await? {
+                return Ok(true);
+            }
         }
         if entry.media.is_some() {
             // TODO(responder-op): send the stored note with its media

@@ -3,12 +3,16 @@
 //! `.poll <question> ; <option> ; <option> [| public|multiple|quiz[_N]]`
 //! — anonymous by default; `public` shows voters, `multiple` allows
 //! multiple choices, `quiz`/`quiz_N` marks the poll as a quiz with the
-//! Nth option correct. All parsing and validation is real; actually
-//! sending the poll needs a `send_file`-style media op the `Responder`
-//! surface does not expose yet (see the `TODO(responder-op)` below).
+//! Nth option correct. All parsing and validation is real; the poll is
+//! sent with the `Responder` `send_poll` op.
+//!
+//! Note: `send_poll` takes no correct-answer index and no
+//! public/anonymous flag, so a `quiz_N` poll is sent as a quiz with the
+//! Nth option *not* marked correct server-side, and a `public` poll is
+//! sent the same way as an anonymous one.
 
 use crate::util::{def, reg_add};
-use ultroid_core::{ChatType, ClientKind, Ctx, Error, Registry, Result};
+use ultroid_core::{ChatType, ClientKind, Ctx, Registry, Result};
 
 pub fn register(registry: &mut Registry) {
     reg_add(
@@ -76,11 +80,18 @@ async fn poll(ctx: &Ctx) -> Result<()> {
         ctx.reply("`Options Should be More than 1..`").await?;
         return Ok(());
     }
-    // TODO(responder-op): send an InputMediaPoll with this question,
-    // options, kind and correct-answer index (Python: polls.py:uri_poll,
-    // `e.respond(file=InputMediaPoll(Poll(...)))`).
-    let _ = (question, options, kind, correct);
-    Err(Error::Other(
-        "send poll requires a binary Responder op (Python: polls.py:uri_poll)".to_string(),
-    ))
+    // NOTE: `send_poll` carries no correct-answer index and no
+    // public/anonymous flag (see the module docs), so `quiz_N` is sent
+    // as a plain quiz poll and `public` like an anonymous one.
+    let _ = correct;
+    ctx.responder
+        .send_poll(
+            ctx.chat_id,
+            &question,
+            options,
+            kind == PollKind::Multiple,
+            kind == PollKind::Quiz,
+        )
+        .await?;
+    Ok(())
 }

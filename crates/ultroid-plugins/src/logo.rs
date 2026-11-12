@@ -1193,15 +1193,16 @@ pub fn parse_inline_add_text(query: &str) -> Option<(String, String)> {
 // ── resolve / deliver ─────────────────────────────────────────────────────
 
 /// Return `(path, owned)` — the image to operate on (`None` when there is
-/// no session and no reply to resolve).
+/// no session and no reply to resolve). A replied image is downloaded via
+/// the Responder into a temp file (`owned` so callers clean it up).
 async fn resolve_target(ctx: &Ctx) -> Result<(Option<PathBuf>, bool)> {
-    if ctx.reply_to_id.is_some() {
-        // TODO(responder-op): download replied media (Python:
-        // logo.py:_resolve_target — `rep.download_media()`)
-        return Err(Error::Other(
-            "downloading replied media requires a binary Responder op (Python: logo.py:_resolve_target)"
-                .to_string(),
-        ));
+    if let Some(reply_id) = ctx.reply_to_id {
+        let dest = std::env::temp_dir().join(format!("ultroid-logo-{}", uuid::Uuid::new_v4()));
+        let path = ctx
+            .responder
+            .download_media(ctx.chat_id, reply_id as i32, &dest)
+            .await?;
+        return Ok((Some(path), true));
     }
     match session_for(ctx.chat_id, ctx.sender_id) {
         Some(s) if s.path.exists() => Ok((Some(s.path), false)),

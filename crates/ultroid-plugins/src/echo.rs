@@ -6,13 +6,10 @@
 //! compatible with the Python database.
 //!
 //! What cannot be expressed through `Ctx` in this wave:
-//! * Reply-based user resolution needs the *sender* of the replied
-//!   message; `Ctx` carries only the replied message id
-//!   (`reply_to_id`), not its sender — that branch is a
-//!   `TODO(responder-op)` error.
-//! * `@username` resolution needs `get_entity` — same TODO.
 //! * `.listecho` display names need `get_entity` per id; ids are listed
 //!   with `tg://user?id=` links instead, which still mention the user.
+//! * Reply-based user resolution comes from `ctx.reply_to_sender_id`
+//!   and `@username` resolution from the `Responder` `resolve_user` op.
 //! * The actual echoing (auto-replying to an echo user's messages) is a
 //!   `NewMessage` event handler, not a command; there is no event-handler
 //!   registration surface in the plugin crate. The `ECHO_GLOBAL_DISABLED`
@@ -23,16 +20,26 @@
 use crate::util::{def, reg_add};
 use std::collections::HashMap;
 use ultroid_core::db::{db_get_json, db_set_json};
-use ultroid_core::{Ctx, Error, Registry, Result};
-
-fn todo_op(op: &str, pyref: &str) -> Error {
-    Error::Other(format!(
-        "{op} requires a binary Responder op (Python: {pyref})"
-    ))
-}
+use ultroid_core::{Ctx, Registry, Result};
 
 /// The stored echo map: `{chat_id: [user_id, …]}` (Python `EchoDB`).
 pub type EchoMap = HashMap<String, Vec<i64>>;
+
+/// Resolve the target user id. `Ok(None)` = no usable target (print the
+/// usage hint, as Python does on a bad argument). Reply-based resolution
+/// comes from `ctx.reply_to_sender_id`; `@username` resolves through the
+/// `Responder`.
+async fn resolve_user(ctx: &Ctx) -> Result<Option<i64>> {
+    if ctx.reply_to_id.is_some() {
+        return Ok(ctx.reply_to_sender_id);
+    }
+    let arg = ctx.text.split_whitespace().nth(1).unwrap_or("");
+    if arg.starts_with('@') {
+        let user = ctx.responder.resolve_user(arg).await?;
+        return Ok(Some(user.id));
+    }
+    Ok(arg.parse::<i64>().ok())
+}
 
 async fn echo_map(ctx: &Ctx) -> Result<EchoMap> {
     Ok(db_get_json(&*ctx.db, "ECHO").await?.unwrap_or_default())
@@ -44,24 +51,6 @@ async fn save_echo_map(ctx: &Ctx, map: &EchoMap) -> Result<()> {
 
 fn chat_key(chat_id: i64) -> String {
     chat_id.to_string()
-}
-
-/// Resolve the target user id. `Ok(None)` = no usable target (print the
-/// usage hint, as Python does on a bad argument). Reply-based and
-/// `@username` forms need Responder ops and surface the honest error.
-async fn resolve_user(ctx: &Ctx) -> Result<Option<i64>> {
-    if ctx.reply_to_id.is_some() {
-        // TODO(responder-op): fetch replied message -> sender id
-        // (Python: echo.py:echo/rm -> r.sender_id).
-        return Err(todo_op("get replied message sender id", "echo.py:echo"));
-    }
-    let arg = ctx.text.split_whitespace().nth(1).unwrap_or("");
-    if arg.starts_with('@') {
-        // TODO(responder-op): get_entity(username) -> id
-        // (Python: echo.py:echo/rm -> e.client.get_entity(user)).
-        return Err(todo_op("get_entity(@username)", "echo.py:echo"));
-    }
-    Ok(arg.parse::<i64>().ok())
 }
 
 fn mention(user_id: i64) -> String {

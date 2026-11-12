@@ -6,10 +6,13 @@
 //! lists (stored as JSON arrays under DB keys `CH_SOURCE` /
 //! `CH_DESTINATIONS`).
 //!
-//! List management is fully real. Resolving a username/`@handle` to a
-//! numeric id, reading messages out of a source channel, and forwarding
-//! them into each destination all need client calls the `Responder`
-//! surface does not expose yet (see the `TODO(responder-op)` sites).
+//! List management is fully real, source/destination display names come
+//! from `Responder::chat_info`, and autopost forwards with
+//! `Responder::forward_to`. Resolving a non-numeric username/`@handle`
+//! to an id still needs a client call (`resolve_user` is user-only, so
+//! it cannot resolve channels), and `.shift`'s message iteration has no
+//! trait op — those are the remaining honest errors (see the
+//! `TODO(responder-op)` site in `shift` and `resolve_id`).
 //! The autopost watcher (`autopost`) must be called by the binary's
 //! NewMessage path when the `AUTOPOST` key is set — `Registry` has no
 //! listener surface.
@@ -177,8 +180,19 @@ async fn listsource(ctx: &Ctx) -> Result<()> {
     }
     let mut msg = ctx.get_str("cha_8");
     for channel in &list.0 {
-        // Empty display name: `get_entity` is not on the Responder surface.
-        msg.push_str(&format!("\n=> **** [`{channel}`]"));
+        // Display name via chat_info; fall back to the id alone when the
+        // chat cannot be resolved.
+        let title = ctx
+            .responder
+            .chat_info(*channel)
+            .await
+            .map(|c| c.title)
+            .unwrap_or_default();
+        if title.is_empty() {
+            msg.push_str(&format!("\n=> **** [`{channel}`]"));
+        } else {
+            msg.push_str(&format!("\n=> **{title}** [`{channel}`]"));
+        }
     }
     msg.push_str(&format!("\nTotal {} channels.", list.0.len()));
     ctx.edit(id, &msg).await?;
@@ -238,8 +252,19 @@ async fn listdest(ctx: &Ctx) -> Result<()> {
     }
     let mut msg = ctx.get_str("cha_7");
     for channel in &list.0 {
-        // Empty display name, as above.
-        msg.push_str(&format!("\n=> **** [`{channel}`]"));
+        // Display name via chat_info; fall back to the id alone when the
+        // chat cannot be resolved.
+        let title = ctx
+            .responder
+            .chat_info(*channel)
+            .await
+            .map(|c| c.title)
+            .unwrap_or_default();
+        if title.is_empty() {
+            msg.push_str(&format!("\n=> **** [`{channel}`]"));
+        } else {
+            msg.push_str(&format!("\n=> **{title}** [`{channel}`]"));
+        }
     }
     msg.push_str(&format!("\nTotal {} channels.", list.0.len()));
     ctx.edit(id, &msg).await?;
@@ -257,11 +282,11 @@ pub async fn autopost(ctx: &Ctx) -> Result<bool> {
     if !sources.0.contains(&ctx.chat_id) {
         return Ok(false);
     }
-    let _destinations = load_list(ctx, "CH_DESTINATIONS").await?;
-    // TODO(responder-op): send this message to each destination id
-    // (Python: channelhacks.py:autopost_func,
-    // `e.client.send_message(int(ys), e.message)`).
-    Err(Error::Other(
-        "autopost forwarding requires a binary Responder op (Python: channelhacks.py:autopost_func)".to_string(),
-    ))
+    let destinations = load_list(ctx, "CH_DESTINATIONS").await?;
+    for dest in &destinations.0 {
+        ctx.responder
+            .forward_to(ctx.chat_id, ctx.message_id as i32, *dest)
+            .await?;
+    }
+    Ok(true)
 }

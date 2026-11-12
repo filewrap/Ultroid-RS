@@ -1,19 +1,21 @@
 //! Chat admin tools — port of `plugins/admintools.py`.
 //!
 //! All argument parsing, permission-target resolution and reply text is
-//! ported. The admin RPCs themselves (promote / demote / ban / unban /
-//! kick / pin / purge / invite-request management / auto-delete TTL) need
-//! raw Telegram calls that the `Ctx`/`Responder` surface does not expose,
-//! so each handler returns the honest `TODO(responder-op)` error at the
-//! exact point the RPC would run (see the report for the full list).
+//! ported. Promote / demote / ban / unban / kick / temp-ban / pin /
+//! unpin / temp-pin are wired to the `Responder` ops. Purge, pinned /
+//! listpinned, auto-delete TTL and invite-request management still need
+//! raw client calls the trait does not expose (message iteration,
+//! pinned-message fetch, `SetHistoryTTL`, join-request RPCs), so those
+//! handlers return the honest `TODO(responder-op)` error at the exact
+//! point the RPC would run (see the report for the full list).
 //!
 //! Note: Python's `manager=True` / `require=<right>` decorator flags have
 //! no `CommandDef` field; the gates are recorded here in comments and in
 //! the report. Patterns are kept exactly as written in Python.
 
 use crate::util::{def, reg_add};
-use std::time::{SystemTime, UNIX_EPOCH};
-use ultroid_core::{ChatType, CommandDef, Ctx, Error, Registry, Result};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use ultroid_core::{AdminRights, BannedRights, ChatType, CommandDef, Ctx, Error, Registry, Result};
 
 pub const HELP: &str = "-\n\n- `.promote <reply to user/userid/username>`\n- `.demote`\n    Promote/Demote the user in the chat.\n\n- `.ban <reply to user/userid/username> <reason>`\n- `.unban`\n    Ban/Unban the user from the chat.\n\n- `.kick <reply to user/userid/username> <reason>`\n    Kick the user from the chat.\n\n- `.pin <reply to message>`\n    Pin the message in the chat\n- `.tpin <time> <temp pin message>`\n- `.unpin (all) <reply to message>`\n    Unpin the messages in the chat.\n\n- `.pinned`\n   Get pinned message in the current chat.\n- `.listpinned`\n   Get all pinned messages in current chat\n\n- `.autodelete <24h/7d/1m/off>`\n   Enable Auto Delete Messages in Chat.\n\n- `.purge <reply to message>`\n    Purge all messages from the replied message.\n\n- `.purgeme <reply to message>`\n    Purge Only your messages from the replied message.\n\n- `.purgeall`\n    Delete all msgs of replied user.\n\n- `.invreq [approve|decline] [all|<user>]`\n    Manage pending join requests.\n";
 
@@ -177,17 +179,26 @@ pub fn ban_time(time_str: &str) -> Result<i64> {
     Ok(now + n * mult)
 }
 
+/// Kick a user: Telethon `kick_participant` is a ban followed by an
+/// immediate unban (`channels.EditBanned` with full rights, then empty
+/// rights).
+async fn kick_user(ctx: &Ctx, chat_id: i64, user_id: i64) -> Result<()> {
+    ctx.responder
+        .ban_user(chat_id, user_id, BannedRights::all_banned())
+        .await?;
+    ctx.responder.unban_user(chat_id, user_id).await
+}
+
 /// Resolve the command's target user (port of `fns.get_uinfo`):
-/// reply -> the replied message's sender; otherwise the first argument
-/// (numeric id resolves locally, `@username`/text id needs a client
-/// lookup). Returns `(user_id, rest_of_args)`.
-fn resolve_user(ctx: &Ctx) -> Result<(i64, String)> {
+/// reply -> the replied message's sender (from `ctx.reply_to_sender_id`);
+/// otherwise the first argument (numeric id resolves locally,
+/// `@username`/text id via `resolve_user`). Returns `(user_id, rest)`.
+async fn resolve_user(ctx: &Ctx) -> Result<(i64, String)> {
     if ctx.reply_to_id.is_some() {
-        // TODO(responder-op): get replied message -> sender id.
-        return Err(todo_op(
-            "get replied message sender",
-            "plugins/admintools.py:get_uinfo",
-        ));
+        let sender = ctx.reply_to_sender_id.ok_or_else(|| {
+            Error::Other("could not determine the replied message's sender".to_string())
+        })?;
+        return Ok((sender, ctx.args.trim().to_string()));
     }
     let mut parts = ctx.args.splitn(2, ' ');
     let first = parts.next().unwrap_or("").trim();
@@ -197,16 +208,13 @@ fn resolve_user(ctx: &Ctx) -> Result<(i64, String)> {
     let rest = parts.next().unwrap_or("").trim().to_string();
     match first.trim_start_matches('@').parse::<i64>() {
         Ok(id) => Ok((id, rest)),
-        Err(_) => Err(todo_op(
-            "resolve user id/username",
-            "plugins/admintools.py:get_uinfo",
-        )),
+        Err(_) => Ok((ctx.responder.resolve_user(first).await?.id, rest)),
     }
 }
 
 async fn promote(ctx: &Ctx) -> Result<()> {
     let _ = ctx.reply(&ctx.get_str("com_1")).await?;
-    let (_user_id, rank_arg) = match resolve_user(ctx) {
+    let (user_id, rank_arg) = match resolve_user(ctx).await {
         Ok(v) => v,
         Err(e) => {
             if e.to_string() == "no_user" {
@@ -230,20 +238,29 @@ async fn promote(ctx: &Ctx) -> Result<()> {
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| "Admin".to_string());
     }
-    // `rank` (and `full_rights`) feed channels.EditAdminRequest once the
-    // responder op lands; the parse is kept live here until then.
-    let _ = (full_rights, &rank);
-    // TODO(responder-op): channels.EditAdminRequest(chat, user, rights, rank).
-    // Python: plugins/admintools.py:prmte.
-    Err(todo_op(
-        "promote user (EditAdminRequest)",
-        "plugins/admintools.py:prmte",
-    ))
+    // Python: full (`-f`) promotion uses the chat's admin rights;
+    // otherwise the fixed set invite/ban/delete/pin/manage_call.
+    let rights = if full_rights {
+        AdminRights::all()
+    } else {
+        AdminRights {
+            invite_users: true,
+            ban_users: true,
+            delete_messages: true,
+            pin_messages: true,
+            manage_call: true,
+            ..Default::default()
+        }
+    };
+    ctx.responder
+        .promote_user(ctx.chat_id, user_id, rights, &rank)
+        .await?;
+    Ok(())
 }
 
 async fn demote(ctx: &Ctx) -> Result<()> {
     let _ = ctx.reply(&ctx.get_str("com_1")).await?;
-    let (user_id, rank_arg) = match resolve_user(ctx) {
+    let (user_id, rank_arg) = match resolve_user(ctx).await {
         Ok(v) => v,
         Err(e) => {
             if e.to_string() == "no_user" {
@@ -253,18 +270,21 @@ async fn demote(ctx: &Ctx) -> Result<()> {
             return Err(e);
         }
     };
-    let _ = rank_arg;
-    let _ = user_id;
-    // TODO(responder-op): edit_admin(chat, user, all rights None, title).
-    // Python: plugins/admintools.py:dmote.
-    Err(todo_op(
-        "demote user (edit_admin)",
-        "plugins/admintools.py:dmote",
-    ))
+    // Python: demote clears every admin right and sets the title to the
+    // given rank, defaulting to "Not Admin".
+    let rank = if rank_arg.is_empty() {
+        "Not Admin".to_string()
+    } else {
+        rank_arg
+    };
+    ctx.responder
+        .promote_user(ctx.chat_id, user_id, AdminRights::default(), &rank)
+        .await?;
+    Ok(())
 }
 
 async fn ban(ctx: &Ctx) -> Result<()> {
-    let (user_id, reason) = match resolve_user(ctx) {
+    let (user_id, reason) = match resolve_user(ctx).await {
         Ok(v) => v,
         Err(e) => {
             if e.to_string() == "no_user" {
@@ -279,12 +299,12 @@ async fn ban(ctx: &Ctx) -> Result<()> {
         return Ok(());
     }
     let _ = reason;
-    // TODO(responder-op): edit_permissions(chat, user, view_messages=False).
-    // Python: plugins/admintools.py:bban.
-    Err(todo_op(
-        "ban user (edit_permissions)",
-        "plugins/admintools.py:bban",
-    ))
+    // Python: edit_permissions(chat, user, view_messages=False) — a full
+    // ban (all banned rights, forever).
+    ctx.responder
+        .ban_user(ctx.chat_id, user_id, BannedRights::all_banned())
+        .await?;
+    Ok(())
 }
 
 async fn unban(ctx: &Ctx) -> Result<()> {
@@ -293,7 +313,7 @@ async fn unban(ctx: &Ctx) -> Result<()> {
         return Ok(());
     }
     let _ = ctx.reply(&ctx.get_str("com_1")).await?;
-    let (user_id, _reason) = match resolve_user(ctx) {
+    let (user_id, _reason) = match resolve_user(ctx).await {
         Ok(v) => v,
         Err(e) => {
             if e.to_string() == "no_user" {
@@ -303,13 +323,10 @@ async fn unban(ctx: &Ctx) -> Result<()> {
             return Err(e);
         }
     };
-    let _ = user_id;
-    // TODO(responder-op): edit_permissions(chat, user, view_messages=True).
-    // Python: plugins/admintools.py:uunban.
-    Err(todo_op(
-        "unban user (edit_permissions)",
-        "plugins/admintools.py:uunban",
-    ))
+    // Python: edit_permissions(chat, user, view_messages=True) — clear
+    // the banned rights.
+    ctx.responder.unban_user(ctx.chat_id, user_id).await?;
+    Ok(())
 }
 
 async fn kick(ctx: &Ctx) -> Result<()> {
@@ -321,7 +338,7 @@ async fn kick(ctx: &Ctx) -> Result<()> {
         return Ok(());
     }
     let _ = ctx.reply(&ctx.get_str("com_1")).await?;
-    let (user_id, _reason) = match resolve_user(ctx) {
+    let (user_id, _reason) = match resolve_user(ctx).await {
         Ok(v) => v,
         Err(e) => {
             if e.to_string() == "no_user" {
@@ -339,9 +356,9 @@ async fn kick(ctx: &Ctx) -> Result<()> {
         ctx.reply(&ctx.get_str("kick_3")).await?;
         return Ok(());
     }
-    // TODO(responder-op): kick_participant(chat, user).
-    // Python: plugins/admintools.py:kck.
-    Err(todo_op("kick participant", "plugins/admintools.py:kck"))
+    // Python: kick_participant(chat, user) — ban, then immediately unban.
+    kick_user(ctx, ctx.chat_id, user_id).await?;
+    Ok(())
 }
 
 async fn tban(ctx: &Ctx) -> Result<()> {
@@ -351,37 +368,30 @@ async fn tban(ctx: &Ctx) -> Result<()> {
         return Ok(());
     };
     let tme = (*tme).to_string();
-    let input = match parts.get(2) {
-        Some(t) => (*t).to_string(),
+    let user_id: i64 = match parts.get(2) {
+        Some(t) => match t.trim_start_matches('@').parse() {
+            Ok(id) => id,
+            Err(_) => ctx.responder.resolve_user(t).await?.id,
+        },
         None => {
             if ctx.reply_to_id.is_some() {
-                // TODO(responder-op): replied message sender id.
-                return Err(todo_op(
-                    "get replied message sender",
-                    "plugins/admintools.py:tkicki",
-                ));
+                ctx.reply_to_sender_id.ok_or_else(|| {
+                    Error::Other("could not determine the replied message's sender".to_string())
+                })?
+            } else {
+                ctx.reply(&ctx.get_str("tban_1")).await?;
+                return Ok(());
             }
-            ctx.reply(&ctx.get_str("tban_1")).await?;
-            return Ok(());
-        }
-    };
-    let user_id: i64 = match input.trim_start_matches('@').parse() {
-        Ok(id) => id,
-        Err(_) => {
-            return Err(todo_op(
-                "resolve user id/username",
-                "plugins/admintools.py:tkicki",
-            ));
         }
     };
     let until = ban_time(&tme)?;
-    let _ = (user_id, until);
-    // TODO(responder-op): edit_permissions(chat, user, until_date, view_messages=False).
-    // Python: plugins/admintools.py:tkicki.
-    Err(todo_op(
-        "temp-ban user (edit_permissions)",
-        "plugins/admintools.py:tkicki",
-    ))
+    // Python: edit_permissions(chat, user, until_date, view_messages=False).
+    let rights = BannedRights {
+        until_date: Some(until as i32),
+        ..BannedRights::all_banned()
+    };
+    ctx.responder.ban_user(ctx.chat_id, user_id, rights).await?;
+    Ok(())
 }
 
 async fn pin(ctx: &Ctx) -> Result<()> {
@@ -389,9 +399,14 @@ async fn pin(ctx: &Ctx) -> Result<()> {
         ctx.reply(&ctx.get_str("pin_1")).await?;
         return Ok(());
     }
-    // TODO(responder-op): pin_message(chat, reply_id, notify=False).
-    // Python: plugins/admintools.py:pin.
-    Err(todo_op("pin message", "plugins/admintools.py:pin"))
+    // Python: pin_message(chat, reply_id, notify=False) — silent pin.
+    let reply_id = ctx
+        .reply_to_id
+        .ok_or_else(|| Error::Other("reply to a message first".to_string()))?;
+    ctx.responder
+        .pin_message(ctx.chat_id, reply_id as i32, true)
+        .await?;
+    Ok(())
 }
 
 async fn unpin(ctx: &Ctx) -> Result<()> {
@@ -408,9 +423,19 @@ async fn unpin(ctx: &Ctx) -> Result<()> {
             .await?;
         return Ok(());
     }
-    // TODO(responder-op): unpin_message(chat, msg_id_or_None).
-    // Python: plugins/admintools.py:unp.
-    Err(todo_op("unpin message", "plugins/admintools.py:unp"))
+    // Python: unpin_message(chat, msg) with msg None unpins all;
+    // a reply unpins that one message.
+    if arg == "all" {
+        ctx.responder.unpin_all(ctx.chat_id).await?;
+    } else {
+        let reply_id = ctx
+            .reply_to_id
+            .ok_or_else(|| Error::Other("reply to a message first".to_string()))?;
+        ctx.responder
+            .unpin_message(ctx.chat_id, reply_id as i32)
+            .await?;
+    }
+    Ok(())
 }
 
 async fn tpin(ctx: &Ctx) -> Result<()> {
@@ -424,13 +449,22 @@ async fn tpin(ctx: &Ctx) -> Result<()> {
         return Ok(());
     }
     let until = ban_time(&duration_arg)?;
-    let _ = until;
-    // TODO(responder-op): pin_message + sleep until `until` + unpin_message.
-    // Python: plugins/admintools.py:pin_message.
-    Err(todo_op(
-        "temp-pin message",
-        "plugins/admintools.py:pin_message",
-    ))
+    let reply_id =
+        ctx.reply_to_id
+            .ok_or_else(|| Error::Other("reply to a message first".to_string()))? as i32;
+    ctx.responder
+        .pin_message(ctx.chat_id, reply_id, true)
+        .await?;
+    // Python sleeps `ban_time(...)` (an absolute timestamp); the port's
+    // intent is to sleep until `until`, i.e. the remaining duration.
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|e| Error::Other(e.to_string()))?
+        .as_secs() as i64;
+    let wait = (until - now).max(0) as u64;
+    tokio::time::sleep(Duration::from_secs(wait)).await;
+    ctx.responder.unpin_message(ctx.chat_id, reply_id).await?;
+    Ok(())
 }
 
 async fn purge(ctx: &Ctx) -> Result<()> {

@@ -6,12 +6,12 @@
 //! `.autokick on|off` is fully ported. The join handler (`dnd_func`,
 //! a `ChatAction` listener that kicks every new joiner) is event-driven:
 //! its decision predicate and kick loop are ported as callable helpers
-//! for the binary's update loop, with the kick RPC as a
-//! `TODO(responder-op)` site.
+//! for the binary's update loop, with the kick RPC wired to
+//! `ban_user` + `unban_user`.
 
 use crate::util::{def, reg_add};
 use ultroid_core::db::{db_get_json, db_set_json};
-use ultroid_core::{CommandDef, Ctx, Error, Registry, Result};
+use ultroid_core::{BannedRights, CommandDef, Ctx, Registry, Result};
 
 pub const HELP: &str = "\n\n- `{i}autokick <on/off>`\n    on - To enable.\n    off - To disable.\n    Automatically kick new joined users from the group.\n";
 
@@ -82,12 +82,20 @@ pub fn dnd_applies(user_joined: bool, dnd_chats: &[i64], chat_id: i64) -> bool {
 }
 
 /// Kick every newly-joined user in a DND chat (Python `dnd_func`).
-/// The kick RPC + deleting the join service message are client ops.
-pub async fn dnd_kick_joins(_ctx: &Ctx, _chat_id: i64, _user_ids: &[i64]) -> Result<()> {
-    // TODO(responder-op): kick_participant(chat, user) per joiner, then
-    // delete the service message. Python: plugins/autoban.py:dnd_func.
-    Err(Error::Other(
-        "kick participant requires a binary Responder op (Python: plugins/autoban.py:dnd_func)"
-            .into(),
-    ))
+/// Per-joiner kick errors are swallowed, like Python's per-user
+/// `try/except`. (Deleting the join service message needs its message
+/// id, which this helper is not passed, so that half stays unwired.)
+pub async fn dnd_kick_joins(ctx: &Ctx, chat_id: i64, user_ids: &[i64]) -> Result<()> {
+    for &user_id in user_ids {
+        // Telethon `kick_participant`: ban, then immediately unban.
+        if ctx
+            .responder
+            .ban_user(chat_id, user_id, BannedRights::all_banned())
+            .await
+            .is_ok()
+        {
+            let _ = ctx.responder.unban_user(chat_id, user_id).await;
+        }
+    }
+    Ok(())
 }

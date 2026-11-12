@@ -64,29 +64,31 @@ pub fn register(registry: &mut Registry) {
 
 // ── shared helpers ────────────────────────────────────────────────────────
 
-/// TODO(responder-op): download replied media to a local file.
-fn todo_download(python_ref: &str) -> Error {
-    Error::Other(format!(
-        "download replied media requires a binary Responder op (Python: {python_ref})"
-    ))
-}
-
 fn tmp_file(ext: &str) -> PathBuf {
     std::env::temp_dir().join(format!("ultroid-beauty-{}.{ext}", uuid::Uuid::new_v4()))
 }
 
 /// The code to render: replied text wins; else the text after the
-/// command; a replied *file* needs a download (TODO site).
-fn code_source(ctx: &Ctx, inline_text: &str) -> Result<Option<String>> {
+/// command; a replied *file* is downloaded via the Responder and read.
+async fn code_source(ctx: &Ctx, inline_text: &str) -> Result<Option<String>> {
     if let Some(t) = &ctx.reply_to_text {
         if !t.trim().is_empty() {
             return Ok(Some(t.clone()));
         }
     }
-    if ctx.reply_to_id.is_some() {
+    if let Some(reply_id) = ctx.reply_to_id {
         // Reply exists but carries no text: Python downloads the file and
-        // reads it. Only the download is missing here.
-        return Err(todo_download("beautify.py:cr_bn/ccarbon"));
+        // reads it.
+        let dest = tmp_file("code.txt");
+        let path = ctx
+            .responder
+            .download_media(ctx.chat_id, reply_id as i32, &dest)
+            .await?;
+        let text = tokio::fs::read_to_string(&path)
+            .await
+            .map_err(|e| Error::Other(format!("replied file is not readable text: {e}")))?;
+        let _ = tokio::fs::remove_file(&path).await;
+        return Ok(Some(text));
     }
     if !inline_text.trim().is_empty() {
         return Ok(Some(inline_text.to_string()));
@@ -281,7 +283,7 @@ async fn carbon(ctx: &Ctx) -> Result<()> {
         .unwrap_or_else(|| "c".to_string());
     let random_bg = group.starts_with('r');
     let msg = ctx.reply("Processing...").await?;
-    let Some(code) = code_source(ctx, &ctx.args)? else {
+    let Some(code) = code_source(ctx, &ctx.args).await? else {
         ctx.edit(
             msg,
             "Give some code to carbonise (reply or text after the command)",
@@ -327,7 +329,7 @@ async fn ccarbon(ctx: &Ctx) -> Result<()> {
         ctx.edit(msg, "Give a colour: `.ccarbon <colour>`").await?;
         return Ok(());
     }
-    let Some(code) = code_source(ctx, &inline_code)? else {
+    let Some(code) = code_source(ctx, &inline_code).await? else {
         ctx.edit(
             msg,
             "Give some code to carbonise (reply or text after the command)",

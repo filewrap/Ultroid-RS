@@ -170,10 +170,16 @@ async fn stars_revenue(ctx: &Ctx) -> Result<()> {
     let peer = if let Some(arg) = ctx.captures.get(1).filter(|s| !s.is_empty()) {
         parse_peer(arg)
     } else if ctx.reply_to_id.is_some() {
-        // The replied message's sender id is not visible on `Ctx`.
-        // TODO(responder-op): resolve the replied message's sender
+        // The replied message's sender is on `ctx.reply_to_sender_id`
         // (Python: stars.py:stars_revenue_cmd, `reply.sender_id`).
-        return Err(stars_op("resolve replied message sender for .starsrev"));
+        match ctx.reply_to_sender_id {
+            Some(id) => id.to_string(),
+            None => {
+                ctx.reply("Could not resolve the replied message's sender.")
+                    .await?;
+                return Ok(());
+            }
+        }
     } else {
         "me".to_string()
     };
@@ -193,11 +199,14 @@ async fn stars_withdraw(ctx: &Ctx) -> Result<()> {
         ctx.reply(WITHDRAW_TEXT).await?;
         return Ok(());
     }
-    // TODO(responder-op): send the instructions to Saved Messages
-    // ("me") and just point at them here — never place
-    // withdrawal-adjacent replies in a group
-    // (Python: stars.py:stars_withdraw_cmd).
-    Err(stars_op("send withdrawal instructions to Saved Messages"))
+    // In a group, send the instructions to Saved Messages ("me") and
+    // just point at them here — never place withdrawal-adjacent replies
+    // in a group (Python: stars.py:stars_withdraw_cmd).
+    let me = ctx.responder.me().await?;
+    ctx.responder.send_to(me.id, WITHDRAW_TEXT).await?;
+    ctx.reply("`Sent the withdrawal instructions to your Saved Messages.`")
+        .await?;
+    Ok(())
 }
 
 async fn pd_on(ctx: &Ctx) -> Result<()> {
@@ -256,12 +265,18 @@ async fn pd_on(ctx: &Ctx) -> Result<()> {
         return finish_pdon_send(ctx, stars, &text).await;
     }
     if ctx.reply_to_id.is_some() {
-        // TODO(responder-op): resolve the replied message's sender, then
-        // account.ToggleNoPaidMessagesExceptionRequest(user, require_payment=true)
-        // (Python: stars.py:pd_on_cmd).
-        return Err(stars_op(
-            "resolve replied sender + ToggleNoPaidMessagesExceptionRequest(require_payment=true)",
-        ));
+        // The replied message's sender is on `ctx.reply_to_sender_id`;
+        // the RPC itself is still missing.
+        // TODO(responder-op): account.ToggleNoPaidMessagesExceptionRequest(
+        // user, require_payment=true) (Python: stars.py:pd_on_cmd).
+        let Some(user_id) = ctx.reply_to_sender_id else {
+            ctx.reply("Could not resolve the replied message's sender.")
+                .await?;
+            return Ok(());
+        };
+        return Err(stars_op(&format!(
+            "ToggleNoPaidMessagesExceptionRequest(user={user_id}, require_payment=true)"
+        )));
     }
     // TODO(responder-op): read-modify-write
     // account.GetGlobalPrivacySettingsRequest +
@@ -283,12 +298,18 @@ async fn finish_pdon_send(ctx: &Ctx, stars: i64, text: &str) -> Result<()> {
 
 async fn pd_off(ctx: &Ctx) -> Result<()> {
     if ctx.reply_to_id.is_some() {
-        // TODO(responder-op): resolve the replied message's sender, then
-        // account.ToggleNoPaidMessagesExceptionRequest(user, require_payment=false)
-        // (Python: stars.py:pd_off_cmd).
-        return Err(stars_op(
-            "resolve replied sender + ToggleNoPaidMessagesExceptionRequest(require_payment=false)",
-        ));
+        // The replied message's sender is on `ctx.reply_to_sender_id`;
+        // the RPC itself is still missing.
+        // TODO(responder-op): account.ToggleNoPaidMessagesExceptionRequest(
+        // user, require_payment=false) (Python: stars.py:pd_off_cmd).
+        let Some(user_id) = ctx.reply_to_sender_id else {
+            ctx.reply("Could not resolve the replied message's sender.")
+                .await?;
+            return Ok(());
+        };
+        return Err(stars_op(&format!(
+            "ToggleNoPaidMessagesExceptionRequest(user={user_id}, require_payment=false)"
+        )));
     }
     // TODO(responder-op): SetGlobalPrivacySettingsRequest with
     // noncontact_peers_paid_stars=0 (Python: stars.py:pd_off_cmd).
@@ -299,12 +320,18 @@ async fn pd_refund(ctx: &Ctx) -> Result<()> {
     let first = ctx.captures.get(1).cloned().unwrap_or_default();
     let second = ctx.captures.get(2).cloned().unwrap_or_default();
     if ctx.reply_to_id.is_some() {
-        // TODO(responder-op): resolve the replied message's sender
-        // (the payer), then payments.RefundStarsChargeRequest(user,
+        // The payer is the replied message's sender, on
+        // `ctx.reply_to_sender_id`; the RPC itself is still missing.
+        // TODO(responder-op): payments.RefundStarsChargeRequest(user,
         // charge_id=first) (Python: stars.py:pd_refund_cmd).
-        return Err(stars_op(
-            "resolve payer from reply + payments.RefundStarsChargeRequest",
-        ));
+        let Some(payer) = ctx.reply_to_sender_id else {
+            ctx.reply("Could not resolve the replied message's sender.")
+                .await?;
+            return Ok(());
+        };
+        return Err(stars_op(&format!(
+            "payments.RefundStarsChargeRequest(user={payer}, charge_id={first})"
+        )));
     }
     if first.trim().is_empty() || second.trim().is_empty() {
         ctx.reply("`Usage: .pdrefund <charge_id>` (reply to the payer) or `.pdrefund <user> <charge_id>`.").await?;

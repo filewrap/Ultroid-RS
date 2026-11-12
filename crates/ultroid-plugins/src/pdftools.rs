@@ -40,11 +40,11 @@
 //!   `skimage.filters.threshold_local` / `cv2.detailEnhance`). No
 //!   OpenCV binding is in the deps; the scan step returns an honest
 //!   error naming the **`opencv`** crate + the Python calls.
-//! * **Telegram gate (TODO(responder-op))**: downloading the replied
-//!   PDF/image (and, for `.pdmerge`, expanding a media-group album)
-//!   needs the binary Responder op. `.pdsend` needs no Telegram op at
-//!   all — it merges local `pdf/*.pdf` files — so it runs up to the
-//!   `lopdf` merge step for real.
+//! * **Telegram downloads**: the replied PDF/image is downloaded via the
+//!   Responder (`download_media`). For `.pdmerge`, expanding a media-group
+//!   album still needs a message lookup the Responder does not offer.
+//!   `.pdsend` needs no Telegram op at all — it merges local `pdf/*.pdf`
+//!   files — so it runs up to the `lopdf` merge step for real.
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -479,16 +479,16 @@ async fn tesseract_png(png: &Path) -> Result<String> {
 // ── Telegram gate ─────────────────────────────────────────────────────────
 
 /// Download the replied PDF into the `pdf/` working dir (port of
-/// `_download_reply_pdf`). The reply's media has to come from Telegram;
-/// the filename is not on `Ctx` either.
-async fn download_reply_pdf(_ctx: &Ctx) -> Result<PathBuf> {
-    // TODO(responder-op): download the replied PDF message's document
-    // (`fns.downloader(path, ok.media.document, ...)` — Python:
-    // pdftools.py:_download_reply_pdf).
-    Err(Error::Other(
-        "download replied PDF file requires a binary Responder op (Python: pdftools.py:_download_reply_pdf)"
-            .to_string(),
-    ))
+/// `_download_reply_pdf`), via the Responder.
+async fn download_reply_pdf(ctx: &Ctx) -> Result<PathBuf> {
+    let reply_id = ctx
+        .reply_to_id
+        .ok_or_else(|| Error::Other("reply to a message first".into()))?;
+    let dir = ensure_pdf_dir(ctx).await?;
+    let dest = dir.join(format!("reply-{}.pdf", uuid::Uuid::new_v4()));
+    ctx.responder
+        .download_media(ctx.chat_id, reply_id as i32, &dest)
+        .await
 }
 
 /// Resolve the `.pdf` / `.pdtext` page argument (empty → all pages,
@@ -785,14 +785,16 @@ async fn pdscan_cmd(ctx: &Ctx) -> Result<()> {
 }
 
 /// Download the replied image (port of the `ok.download_media()` call in
-/// `pdftools.py:imgscan` / `savepdf`).
-async fn download_reply_image(_ctx: &Ctx) -> Result<PathBuf> {
-    // TODO(responder-op): download the replied image message's media
-    // (Python: pdftools.py:imgscan / savepdf).
-    Err(Error::Other(
-        "download replied image requires a binary Responder op (Python: pdftools.py:imgscan)"
-            .to_string(),
-    ))
+/// `pdftools.py:imgscan` / `savepdf`), via the Responder.
+async fn download_reply_image(ctx: &Ctx) -> Result<PathBuf> {
+    let reply_id = ctx
+        .reply_to_id
+        .ok_or_else(|| Error::Other("reply to a message first".into()))?;
+    let dir = ensure_pdf_dir(ctx).await?;
+    let dest = dir.join(format!("reply-image-{}", uuid::Uuid::new_v4()));
+    ctx.responder
+        .download_media(ctx.chat_id, reply_id as i32, &dest)
+        .await
 }
 
 async fn pdsave_cmd(ctx: &Ctx) -> Result<()> {
@@ -825,14 +827,27 @@ async fn pdsave_cmd(ctx: &Ctx) -> Result<()> {
 }
 
 /// Download the replied image/PDF and report whether it is a PDF (port of
-/// the `ok.download_media()` call in `pdftools.py:savepdf`).
-async fn download_reply_media(_ctx: &Ctx) -> Result<(PathBuf, bool)> {
-    // TODO(responder-op): download the replied message's media and report
-    // its kind (Python: pdftools.py:savepdf).
-    Err(Error::Other(
-        "download replied image/PDF requires a binary Responder op (Python: pdftools.py:savepdf)"
-            .to_string(),
-    ))
+/// the `ok.download_media()` call in `pdftools.py:savepdf`). The kind is
+/// sniffed from the file's magic bytes (`%PDF` header).
+async fn download_reply_media(ctx: &Ctx) -> Result<(PathBuf, bool)> {
+    let reply_id = ctx
+        .reply_to_id
+        .ok_or_else(|| Error::Other("reply to a message first".into()))?;
+    let dir = ensure_pdf_dir(ctx).await?;
+    let dest = dir.join(format!("reply-media-{}", uuid::Uuid::new_v4()));
+    let path = ctx
+        .responder
+        .download_media(ctx.chat_id, reply_id as i32, &dest)
+        .await?;
+    let is_pdf = {
+        use std::io::Read;
+        let mut buf = [0u8; 5];
+        std::fs::File::open(&path)
+            .and_then(|mut f| f.read(&mut buf))
+            .map(|n| &buf[..n] == b"%PDF-")
+            .unwrap_or(false)
+    };
+    Ok((path, is_pdf))
 }
 
 async fn pdsend_cmd(ctx: &Ctx) -> Result<()> {

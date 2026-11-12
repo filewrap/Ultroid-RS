@@ -108,8 +108,32 @@ async fn add_cmd(ctx: &Ctx) -> Result<()> {
     }
     // The replied message's text / media / buttons are not on the `Ctx`
     // surface (only `reply_to_text` is). Text replies are ported below;
-    // media replies need a download + telegraph upload.
-    match ctx.reply_to_text.as_deref() {
+    // a text-less reply is re-fetched through `message_summary` (which
+    // also carries the media flag); media replies still need a download
+    // + telegraph upload / bot file id, which no trait op provides.
+    let reply_text: Option<String> = match ctx.reply_to_text.clone() {
+        Some(text) => Some(text),
+        None => match ctx.reply_to_id {
+            Some(reply_id) => {
+                match ctx
+                    .responder
+                    .message_summary(ctx.chat_id, reply_id as i32)
+                    .await?
+                {
+                    Some(summary) if !summary.text.is_empty() => Some(summary.text),
+                    Some(summary) if summary.has_media => {
+                        return Err(todo_op(
+                            "get replied message media/text for asstcmd",
+                            "plugins/asstcmd.py:ac",
+                        ));
+                    }
+                    _ => None,
+                }
+            }
+            None => None,
+        },
+    };
+    match reply_text.as_deref() {
         Some(text) if !text.is_empty() => {
             let (txt, btn) = crate::greetings::split_msg_button(text);
             let mut map = get_asstcmds(ctx).await?;

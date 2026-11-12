@@ -522,17 +522,22 @@ async fn cmd_paste(ctx: &Ctx) -> Result<()> {
         if let Some(text) = &ctx.reply_to_text {
             message = Some(text.clone());
         } else {
-            // TODO(responder-op): download the replied file and paste its text
-            // (Python: plugins/utilities.py paste via download_media).
-            let _ = ctx
-                .edit(
-                    status,
-                    "`Reply to a Message/Document or Give me Some Text !`",
-                )
-                .await;
-            return Err(Error::Other(
-                "pasting a replied file requires a binary Responder op (Python: plugins/utilities.py paste via client.download_media)".to_string(),
+            // Reply to a file: download it and paste its text.
+            let reply_id = ctx.reply_to_id.expect("checked above");
+            let dest = std::env::temp_dir().join(format!(
+                "ultroid-paste-{}",
+                uuid::Uuid::new_v4().as_simple()
             ));
+            let path = ctx
+                .responder
+                .download_media(ctx.chat_id, reply_id as i32, &dest)
+                .await?;
+            let bytes = tokio::fs::read(&path).await.map_err(Error::Io)?;
+            let _ = tokio::fs::remove_file(&path).await;
+            message = Some(
+                String::from_utf8(bytes)
+                    .map_err(|_| Error::Other("the replied file is not text".to_string()))?,
+            );
         }
     }
     let Some(message) = message.filter(|m| !m.trim().is_empty()) else {
@@ -559,24 +564,64 @@ async fn cmd_paste(ctx: &Ctx) -> Result<()> {
 async fn cmd_info(ctx: &Ctx) -> Result<()> {
     let status = ctx.reply(&ctx.get_str("com_1")).await?;
     let arg = ctx.args.trim();
-    let user: Option<i64> = if !arg.is_empty() {
-        arg.trim_start_matches('@').parse::<i64>().ok()
+    let target: i64 = if !arg.is_empty() {
+        match arg.trim_start_matches('@').parse::<i64>() {
+            Ok(id) => id,
+            Err(_) => ctx.responder.resolve_user(arg).await?.id,
+        }
     } else if ctx.reply_to_id.is_some() {
-        // TODO(responder-op): resolve the replied message's sender
-        // (Python: plugins/utilities.py info via get_reply_message().sender_id).
-        let _ = status;
-        return Err(Error::Other(
-            "resolving the replied message's sender requires a binary Responder op (Python: plugins/utilities.py info via get_reply_message())".to_string(),
-        ));
+        match ctx.reply_to_sender_id {
+            Some(id) => id,
+            None => {
+                ctx.edit(
+                    status,
+                    "`Could not determine the sender of the replied message.`",
+                )
+                .await?;
+                return Ok(());
+            }
+        }
     } else {
-        Some(ctx.chat_id)
+        ctx.chat_id
     };
-    let _ = user;
-    // TODO(responder-op): users.GetFullUserRequest / get_entity / get_profile_photos
-    // (Python: plugins/utilities.py info).
-    Err(Error::Other(
-        "fetching full user info requires a binary Responder op (Python: plugins/utilities.py info via users.GetFullUserRequest / client.get_entity)".to_string(),
-    ))
+    // NOTE: `user_full` returns the `UserSummary` (id, names, username,
+    // premium, bot) — no bio, DC id, photo count, restricted/verified
+    // flags, common chats or last-online, so those Python fields are
+    // omitted here rather than faked.
+    match ctx.responder.user_full(target).await {
+        Ok(user) => {
+            let caption = format!(
+                "**Exᴛʀᴀᴄᴛᴇᴅ Dᴀᴛᴀ Fʀᴏᴍ Tᴇʟᴇɢʀᴀᴍ's Dᴀᴛᴀʙᴀsᴇ**\n**••Tᴇʟᴇɢʀᴀᴍ ID**: `{}`\n**••Pᴇʀᴍᴀɴᴇɴᴛ Lɪɴᴋ**: [Click Here](tg://user?id={})\n**••Fɪʀsᴛ Nᴀᴍᴇ**: `{}`\n**••Sᴇᴄᴏɴᴅ Nᴀᴍᴇ**: `{}`\n**••Usᴇʀɴᴀᴍᴇ**: `{}`\n**••Is Pʀᴇᴍɪᴜᴍ**: `{}`\n**••Is A Bᴏᴛ**: `{}`",
+                user.id,
+                user.id,
+                user.first_name,
+                user.last_name.as_deref().unwrap_or("Last Name not found"),
+                user.username
+                    .as_deref()
+                    .map(|u| format!("@{u}"))
+                    .unwrap_or_else(|| "No username".to_string()),
+                user.premium,
+                user.bot,
+            );
+            ctx.edit(status, &caption).await?;
+        }
+        Err(_) => {
+            // Not a user — render the chat/channel card instead.
+            let chat = ctx.responder.chat_info(target).await?;
+            let kind = format!("{:?}", chat.kind);
+            let caption = format!(
+                "**Chat Info**\n**••ID**: `{}`\n**••Title**: `{}`\n**••Usᴇʀɴᴀᴍᴇ**: `{}`\n**••Kind**: `{kind}`",
+                chat.id,
+                chat.title,
+                chat.username
+                    .as_deref()
+                    .map(|u| format!("@{u}"))
+                    .unwrap_or_else(|| "No username".to_string()),
+            );
+            ctx.edit(status, &caption).await?;
+        }
+    }
+    Ok(())
 }
 
 async fn cmd_invite(ctx: &Ctx) -> Result<()> {
@@ -613,11 +658,16 @@ async fn cmd_rmbg(ctx: &Ctx) -> Result<()> {
     if !arg.is_empty() && std::path::Path::new(arg).exists() {
         local_path = Some(arg.to_string());
     } else if ctx.reply_to_id.is_some() {
-        // TODO(responder-op): download the replied media
-        // (Python: plugins/utilities.py rmbg via reply.download_media()).
-        return Err(Error::Other(
-            "removing the background of a replied picture requires a binary Responder op (Python: plugins/utilities.py rmbg via reply.download_media())".to_string(),
+        let reply_id = ctx.reply_to_id.expect("checked above");
+        let dest = std::env::temp_dir().join(format!(
+            "ultroid-rmbg-reply-{}",
+            uuid::Uuid::new_v4().as_simple()
         ));
+        let downloaded = ctx
+            .responder
+            .download_media(ctx.chat_id, reply_id as i32, &dest)
+            .await?;
+        local_path = Some(normalise_image_path(&downloaded).await);
     } else {
         ctx.reply("Use `.rmbg` as reply to a pic to remove its background.")
             .await?;
@@ -723,6 +773,35 @@ async fn cmd_rmbg(ctx: &Ctx) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+/// If `path` has no recognised image extension, try decoding it and
+/// re-saving as PNG; otherwise return `path` unchanged. Used for a
+/// downloaded reply in `.rmbg`, where the download has no filename.
+async fn normalise_image_path(path: &std::path::Path) -> String {
+    let lower = path.to_string_lossy().to_lowercase();
+    if lower.ends_with("webp")
+        || lower.ends_with("jpg")
+        || lower.ends_with("png")
+        || lower.ends_with("jpeg")
+    {
+        return path.to_string_lossy().into_owned();
+    }
+    let Ok(bytes) = tokio::fs::read(path).await else {
+        return path.to_string_lossy().into_owned();
+    };
+    let Ok(img) = image::load_from_memory(&bytes) else {
+        return path.to_string_lossy().into_owned();
+    };
+    let png_path = std::env::temp_dir().join(format!(
+        "ultroid-rmbg-reply-{}.png",
+        uuid::Uuid::new_v4().as_simple()
+    ));
+    if img.save(&png_path).is_ok() {
+        let _ = tokio::fs::remove_file(path).await;
+        return png_path.to_string_lossy().into_owned();
+    }
+    path.to_string_lossy().into_owned()
 }
 
 async fn cmd_telegraph(ctx: &Ctx) -> Result<()> {

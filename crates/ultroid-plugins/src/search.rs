@@ -8,8 +8,10 @@
 //! `.img <query> [; n]` — SerpAPI image search; needs the `SERPAPI` DB
 //! key, else errors naming it (real HTTP; images are downloaded to a
 //! temp file and sent with `send_file`).
-//! `.reverse` (reply to an image) — reverse image search; needs the
-//! replied media downloaded first (see the `TODO(responder-op)` below).
+//! `.reverse` (reply to an image) — reverse image search; the replied
+//! media is downloaded with the `Responder` `download_media` op,
+//! converted to PNG with the `image` crate, then uploaded to Google's
+//! search-by-image endpoint (plain HTTP, `reverse_search`).
 
 use crate::util::{db_get, def, reg_add};
 use regex::Regex;
@@ -278,15 +280,49 @@ async fn reverse(ctx: &Ctx) -> Result<()> {
         ctx.reply("`Reply to an Image`").await?;
         return Ok(());
     }
-    let _id = ctx.reply(&ctx.get_str("com_1")).await?;
-    // TODO(responder-op): download the replied image and convert it to
-    // PNG (Python: search.py:reverse, `reply.download_media()` +
-    // `con.convert(dl, convert_to="png")`); the upload to
-    // google.com/searchbyimage and the result parsing below are plain
-    // HTTP and are implemented in `reverse_search`.
-    Err(Error::Other(
-        "download replied media for reverse image search requires a binary Responder op (Python: search.py:reverse)".to_string(),
-    ))
+    let status = ctx.reply(&ctx.get_str("com_1")).await?;
+    let reply_id = ctx.reply_to_id.expect("checked above");
+    let dest = std::env::temp_dir().join(format!(
+        "ultroid-reverse-{}.bin",
+        uuid::Uuid::new_v4().as_simple()
+    ));
+    let downloaded = ctx
+        .responder
+        .download_media(ctx.chat_id, reply_id as i32, &dest)
+        .await?;
+    // Google's endpoint wants a PNG; convert whatever was downloaded.
+    let png_path = std::env::temp_dir().join(format!(
+        "ultroid-reverse-{}.png",
+        uuid::Uuid::new_v4().as_simple()
+    ));
+    let converted = (|| {
+        let img = image::open(&downloaded)
+            .map_err(|e| Error::Other(format!("read downloaded image: {e}")))?;
+        img.save(&png_path)
+            .map_err(|e| Error::Other(format!("convert downloaded image to PNG: {e}")))?;
+        Ok::<_, Error>(())
+    })();
+    let _ = tokio::fs::remove_file(&downloaded).await;
+    if let Err(e) = converted {
+        ctx.edit(status, &format!("`Cannot read image: {e}`"))
+            .await?;
+        return Ok(());
+    }
+    let hit = reverse_search(ctx, &png_path).await;
+    let _ = tokio::fs::remove_file(&png_path).await;
+    match hit? {
+        Some((text, link, w, h)) => {
+            ctx.edit(
+                status,
+                &format!("`Dimension ~ {w} : {h}`\nSauce ~ [{text}](google.com{link})"),
+            )
+            .await?;
+        }
+        None => {
+            ctx.edit(status, "`No match found for this image.`").await?;
+        }
+    }
+    Ok(())
 }
 
 /// Upload a local PNG to Google's search-by-image endpoint and return the

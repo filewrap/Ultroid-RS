@@ -7,15 +7,14 @@
 //! itself is a `TODO(responder-op)` site).
 //!
 //! `.tmute` / `.mute` / `.unmute` use Telegram's `edit_permissions`
-//! rights-mute instead; their parsing is ported and the RPCs are
-//! `TODO(responder-op)` sites. Patterns are kept exactly as written in
-//! Python, including the literal `dbs.mute.<cmd>` prefixes on `mute` /
-//! `unmute`.
+//! rights-mute instead; their parsing is ported and the RPCs are wired
+//! to the `Responder` ops (`ban_user` with send-messages-only rights for
+//! mute, `unban_user` to lift it).
 
 use crate::util::{def, reg_add};
 use std::collections::HashMap;
 use ultroid_core::db::{db_get_json, db_set_json};
-use ultroid_core::{CommandDef, Ctx, Error, Registry, Result};
+use ultroid_core::{BannedRights, CommandDef, Ctx, Error, Registry, Result};
 
 pub const HELP: &str = "✘ Commands Available -\n\n• `{i}mute <reply to msg/ user id>`\n    Mute user in current chat.\n\n• `{i}unmute <reply to msg/ user id>`\n    Unmute user in current chat.\n\n• `{i}dmute <reply to msg/ user id>`\n    Mute user in current chat by deleting msgs.\n\n• `{i}undmute <reply to msg/ use id>`\n    Unmute dmuted user in current chat.\n\n• `{i}tmute <time> <reply to msg/ use id>`\n    s- seconds\n    m- minutes\n    h- hours\n    d- days\n    Mute user in current chat with time.\n";
 
@@ -61,12 +60,6 @@ pub fn register(registry: &mut Registry) {
     );
 }
 
-fn todo_op(op: &str, py: &str) -> Error {
-    Error::Other(format!(
-        "{op} requires a binary Responder op (Python: {py})"
-    ))
-}
-
 /// Markdown mention of a user id (Python `fns.inline_mention` with only
 /// the id known).
 pub fn mention_id(user_id: i64) -> String {
@@ -108,20 +101,35 @@ pub async fn unmute_user(ctx: &Ctx, chat_id: i64, user_id: i64) -> Result<()> {
     set_muted(ctx, &map).await
 }
 
+/// The mute rights Python uses (`edit_permissions(..., send_messages=
+/// False)`): only the send-messages right is banned, view-messages
+/// stays open.
+fn mute_rights(until: Option<i32>) -> BannedRights {
+    BannedRights {
+        until_date: until,
+        send_messages: true,
+        ..Default::default()
+    }
+}
+
 /// Resolve a mute target from an argument or a reply (port of the repeated
-/// pattern in `mute.py`): reply -> sender (needs fetch); numeric arg ->
-/// id; `@username` -> needs resolve; private chat -> the chat itself.
-fn resolve_target(ctx: &Ctx, py_fn: &str) -> Result<i64> {
+/// pattern in `mute.py`): reply -> the replied message's sender (from
+/// `ctx.reply_to_sender_id`); numeric arg -> id; `@username` ->
+/// `resolve_user`; private chat -> the chat itself.
+async fn resolve_target(ctx: &Ctx, py_fn: &str) -> Result<i64> {
+    let _ = py_fn;
     let input = ctx.args.trim();
     if !input.is_empty() {
         let first = input.split_whitespace().next().unwrap_or("");
         return match first.trim_start_matches('@').parse::<i64>() {
             Ok(id) => Ok(id),
-            Err(_) => Err(todo_op("resolve user id/username", py_fn)),
+            Err(_) => Ok(ctx.responder.resolve_user(first).await?.id),
         };
     }
     if ctx.reply_to_id.is_some() {
-        return Err(todo_op("get replied message sender", py_fn));
+        return ctx.reply_to_sender_id.ok_or_else(|| {
+            Error::Other("could not determine the replied message's sender".to_string())
+        });
     }
     if ctx.chat_type == ultroid_core::ChatType::Private {
         return Ok(ctx.chat_id);
@@ -131,7 +139,7 @@ fn resolve_target(ctx: &Ctx, py_fn: &str) -> Result<i64> {
 
 async fn dmute(ctx: &Ctx) -> Result<()> {
     let _ = ctx.reply("`Muting...`").await?;
-    let user_id = match resolve_target(ctx, "plugins/mute.py:startmute") {
+    let user_id = match resolve_target(ctx, "plugins/mute.py:startmute").await {
         Ok(id) => id,
         Err(e) if e.to_string() == "missing_target" => {
             ctx.reply("`Reply to a user or add their userid.`").await?;
@@ -153,7 +161,7 @@ async fn dmute(ctx: &Ctx) -> Result<()> {
 
 async fn undmute(ctx: &Ctx) -> Result<()> {
     let _ = ctx.reply("`Unmuting...`").await?;
-    let user_id = match resolve_target(ctx, "plugins/mute.py:endmute") {
+    let user_id = match resolve_target(ctx, "plugins/mute.py:endmute").await {
         Ok(id) => id,
         Err(e) if e.to_string() == "missing_target" => {
             ctx.reply("`Reply to a user or add their userid.`").await?;
@@ -180,17 +188,17 @@ async fn tmute(ctx: &Ctx) -> Result<()> {
     let user_id = match parts.get(2).copied() {
         Some(tok) => match tok.trim_start_matches('@').parse::<i64>() {
             Ok(id) => id,
-            Err(_) => return Err(todo_op("resolve user id/username", "plugins/mute.py:tmute")),
+            Err(_) => ctx.responder.resolve_user(tok).await?.id,
         },
         None => {
             if ctx.reply_to_id.is_some() {
-                return Err(todo_op(
-                    "get replied message sender",
-                    "plugins/mute.py:tmute",
-                ));
+                ctx.reply_to_sender_id.ok_or_else(|| {
+                    Error::Other("could not determine the replied message's sender".to_string())
+                })?
+            } else {
+                ctx.reply(&ctx.get_str("tban_1")).await?;
+                return Ok(());
             }
-            ctx.reply(&ctx.get_str("tban_1")).await?;
-            return Ok(());
         }
     };
     if user_id == ctx.config.owner_id {
@@ -198,18 +206,16 @@ async fn tmute(ctx: &Ctx) -> Result<()> {
         return Ok(());
     }
     let until = crate::admintools::ban_time(tme)?;
-    let _ = until;
-    // TODO(responder-op): edit_permissions(chat, user, until_date, send_messages=False).
-    // Python: plugins/mute.py:tmute handler.
-    Err(todo_op(
-        "temp-mute user (edit_permissions)",
-        "plugins/mute.py:tmute",
-    ))
+    // Python: edit_permissions(chat, user, until_date, send_messages=False).
+    ctx.responder
+        .ban_user(ctx.chat_id, user_id, mute_rights(Some(until as i32)))
+        .await?;
+    Ok(())
 }
 
 async fn unmute_perm(ctx: &Ctx) -> Result<()> {
     let _ = ctx.reply("`Unmuting...`").await?;
-    let user_id = match resolve_target(ctx, "plugins/mute.py:unmute") {
+    let user_id = match resolve_target(ctx, "plugins/mute.py:unmute").await {
         Ok(id) => id,
         Err(e) if e.to_string() == "missing_target" => {
             ctx.reply(&ctx.get_str("tban_1")).await?;
@@ -217,17 +223,16 @@ async fn unmute_perm(ctx: &Ctx) -> Result<()> {
         }
         Err(e) => return Err(e),
     };
-    let _ = user_id;
-    // TODO(responder-op): edit_permissions(chat, user, until_date=None, send_messages=True).
-    Err(todo_op(
-        "unmute user (edit_permissions)",
-        "plugins/mute.py:unmute",
-    ))
+    // Python: edit_permissions(chat, user, until_date=None,
+    // send_messages=True) — `unban_user` clears the banned rights,
+    // which lifts the send ban.
+    ctx.responder.unban_user(ctx.chat_id, user_id).await?;
+    Ok(())
 }
 
 async fn mute_perm(ctx: &Ctx) -> Result<()> {
     let _ = ctx.reply("`Muting...`").await?;
-    let user_id = match resolve_target(ctx, "plugins/mute.py:mute") {
+    let user_id = match resolve_target(ctx, "plugins/mute.py:mute").await {
         Ok(id) => id,
         Err(e) if e.to_string() == "missing_target" => {
             ctx.reply(&ctx.get_str("tban_1")).await?;
@@ -239,11 +244,12 @@ async fn mute_perm(ctx: &Ctx) -> Result<()> {
         ctx.reply("`I can't mute myself.`").await?;
         return Ok(());
     }
-    // TODO(responder-op): edit_permissions(chat, user, until_date=None, send_messages=False).
-    Err(todo_op(
-        "mute user (edit_permissions)",
-        "plugins/mute.py:mute",
-    ))
+    // Python: edit_permissions(chat, user, until_date=None,
+    // send_messages=False).
+    ctx.responder
+        .ban_user(ctx.chat_id, user_id, mute_rights(None))
+        .await?;
+    Ok(())
 }
 
 /// The live watcher (Python `watcher`): delete a message when its sender

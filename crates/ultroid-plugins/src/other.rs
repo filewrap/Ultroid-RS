@@ -5,10 +5,16 @@
 //! private. `.save`/`.fsave` — save the replied message to Saved
 //! Messages (copy / forward).
 //!
-//! Argument parsing and validation are real. Resolving a username to an
-//! id, sending to an arbitrary peer, and forwarding/copying a message
-//! all need client calls the `Responder` surface does not expose yet
-//! (see the `TODO(responder-op)` sites).
+//! Argument parsing and validation are real. Sending, forwarding and
+//! resolving a username to an id go through the `Responder`
+//! (`send_to` / `forward_to` / `resolve_user` / `message_summary` /
+//! `download_media` / `me`).
+//!
+//! Note: `.fwdreply` replies to the forwarded copy with a plain send —
+//! the `Responder` surface has no reply-to-a-message send. `.save`
+//! (copy) re-sends the replied message's text — or its downloaded
+//! media with the text as caption — to Saved Messages, which is the
+//! account's own id from `me()`.
 
 use crate::util::{def, reg_add};
 use ultroid_core::{Ctx, Error, Registry, Result};
@@ -41,28 +47,16 @@ pub fn register(registry: &mut Registry) {
     );
 }
 
-fn responder_op(op: &str, py: &str) -> Error {
-    Error::Other(format!(
-        "{op} requires a binary Responder op (Python: {py})"
-    ))
-}
-
-/// Resolve a numeric id; usernames need a client-side `parse_id`.
-fn resolve_peer(token: &str) -> std::result::Result<i64, Error> {
-    token
-        .trim()
-        .trim_start_matches('@')
-        .parse::<i64>()
-        .map_err(|_| responder_op(&format!("resolve peer '{token}' to an id"), "other.py:dm"))
-}
-
 async fn dm(ctx: &Ctx) -> Result<()> {
     let mut words = ctx.args.split_whitespace();
     let Some(chat_tok) = words.next() else {
         ctx.reply(&ctx.get_str("dm_1")).await?;
         return Ok(());
     };
-    let chat_id = resolve_peer(chat_tok)?;
+    let chat_id = match chat_tok.trim_start_matches('@').parse::<i64>() {
+        Ok(id) => id,
+        Err(_) => ctx.responder.resolve_user(chat_tok).await?.id,
+    };
     let msg = ctx.args.splitn(2, char::is_whitespace).nth(1);
     let Some(msg) = msg
         .filter(|m| !m.trim().is_empty())
@@ -71,19 +65,14 @@ async fn dm(ctx: &Ctx) -> Result<()> {
         ctx.reply(&ctx.get_str("dm_2")).await?;
         return Ok(());
     };
-    let _ = msg;
-    let _ = chat_id;
-    // TODO(responder-op): send `msg` to `chat_id` (Python: other.py:dm,
-    // `e.client.send_message(chat_id, msg)`).
-    Err(responder_op(
-        &format!("send_message to peer {chat_id}"),
-        "other.py:dm",
-    ))
+    ctx.responder.send_to(chat_id, msg).await?;
+    ctx.reply(&ctx.get_str("dm_3")).await?;
+    Ok(())
 }
 
 async fn fwdreply(ctx: &Ctx) -> Result<()> {
     let message = ctx.args.trim();
-    let Some(_reply_id) = ctx.reply_to_id else {
+    let Some(reply_id) = ctx.reply_to_id else {
         ctx.reply(&ctx.get_str("ex_1")).await?;
         return Ok(());
     };
@@ -91,31 +80,60 @@ async fn fwdreply(ctx: &Ctx) -> Result<()> {
         ctx.reply(&ctx.get_str("dm_6")).await?;
         return Ok(());
     }
-    // TODO(responder-op): forward the replied message to its sender, then
-    // reply `message` to the forwarded copy (Python: other.py:_,
-    // `msg.forward_to(msg.sender_id)` + `fwd.reply(message)`).
-    Err(responder_op(
-        "forward replied message to its sender",
-        "other.py:_",
-    ))
+    let Some(sender_id) = ctx.reply_to_sender_id else {
+        return Err(Error::Other(
+            "could not determine the sender of the replied message".to_string(),
+        ));
+    };
+    ctx.responder
+        .forward_to(ctx.chat_id, reply_id as i32, sender_id)
+        .await?;
+    // No reply-to-a-message send on the `Responder` surface, so the
+    // reply to the forwarded copy goes as a plain message to its sender.
+    ctx.responder.send_to(sender_id, message).await?;
+    ctx.reply(&ctx.get_str("dm_5")).await?;
+    Ok(())
 }
 
 async fn save(ctx: &Ctx) -> Result<()> {
-    if ctx.reply_to_id.is_none() {
+    let Some(reply_id) = ctx.reply_to_id else {
         ctx.reply("Reply to Any Message to save it to ur saved messages")
             .await?;
         return Ok(());
-    }
+    };
     let forward = ctx.captures.get(1).map(|s| s == "f").unwrap_or(false);
-    // TODO(responder-op): copy (or, for `.fsave`, forward) the replied
-    // message to Saved Messages (Python: other.py:saf,
-    // `x.forward_to(e.sender_id)` / `e.client.send_message(e.sender_id, x)`).
-    Err(responder_op(
-        if forward {
-            "forward replied message to Saved Messages"
+    // Saved Messages is the account's own dialog.
+    let me_id = ctx.responder.me().await?.id;
+    if forward {
+        ctx.responder
+            .forward_to(ctx.chat_id, reply_id as i32, me_id)
+            .await?;
+    } else {
+        let Some(summary) = ctx
+            .responder
+            .message_summary(ctx.chat_id, reply_id as i32)
+            .await?
+        else {
+            return Err(Error::Other("the replied message was deleted".to_string()));
+        };
+        if summary.has_media {
+            let dest = std::env::temp_dir()
+                .join(format!("ultroid-save-{}", uuid::Uuid::new_v4().as_simple()));
+            let path = ctx
+                .responder
+                .download_media(ctx.chat_id, reply_id as i32, &dest)
+                .await?;
+            let r = ctx
+                .responder
+                .send_file_to(me_id, &path, &summary.text)
+                .await;
+            let _ = tokio::fs::remove_file(&path).await;
+            r?;
         } else {
-            "copy replied message to Saved Messages"
-        },
-        "other.py:saf",
-    ))
+            ctx.responder.send_to(me_id, &summary.text).await?;
+        }
+    }
+    ctx.reply("Message saved to Your Pm/Saved Messages.")
+        .await?;
+    Ok(())
 }

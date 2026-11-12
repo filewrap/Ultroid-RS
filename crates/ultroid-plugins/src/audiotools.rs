@@ -13,8 +13,8 @@
 //!   here either.
 //!
 //! Every command works on a local file path given as an argument, and on
-//! replied-to Telegram media once it is on disk. Downloading the replied
-//! media is the single TODO(responder-op) site per command.
+//! replied-to Telegram media, downloaded via the Responder
+//! (`download_media`).
 
 use std::path::{Path, PathBuf};
 use tokio::process::Command as ProcCommand;
@@ -96,14 +96,8 @@ pub fn register(registry: &mut Registry) {
 
 // ── shared helpers ────────────────────────────────────────────────────────
 
-/// The Telegram download step: cannot be expressed through `Ctx` today.
-/// TODO(responder-op): download replied media to a local file.
-fn todo_download(python_ref: &str) -> Error {
-    Error::Other(format!(
-        "download replied media requires a binary Responder op (Python: {python_ref})"
-    ))
-}
-
+/// Resolve the input file: a local path in args, else the replied media
+/// (downloaded via the Responder), else a usage error reply.
 /// First whitespace token of the args that names an existing local file.
 fn local_input(ctx: &Ctx) -> Option<PathBuf> {
     ctx.args
@@ -113,14 +107,17 @@ fn local_input(ctx: &Ctx) -> Option<PathBuf> {
         .filter(|p| p.is_file())
 }
 
-/// Resolve the input file: a local path in args, else the replied media
-/// (TODO site), else a usage error reply.
-async fn resolve_input(ctx: &Ctx, python_ref: &str) -> Result<Option<PathBuf>> {
+async fn resolve_input(ctx: &Ctx, _python_ref: &str) -> Result<Option<PathBuf>> {
     if let Some(p) = local_input(ctx) {
         return Ok(Some(p));
     }
-    if ctx.reply_to_id.is_some() {
-        return Err(todo_download(python_ref));
+    if let Some(reply_id) = ctx.reply_to_id {
+        let dest = tmp_file("input");
+        let path = ctx
+            .responder
+            .download_media(ctx.chat_id, reply_id as i32, &dest)
+            .await?;
+        return Ok(Some(path));
     }
     Ok(None)
 }

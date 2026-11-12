@@ -17,6 +17,7 @@ use crate::util::{def, reg_add};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use ultroid_core::db::features::Features;
+use ultroid_core::tg::InlineButton;
 use ultroid_core::{Ctx, Error, Registry, Result};
 
 pub fn register(registry: &mut Registry) {
@@ -75,21 +76,64 @@ pub fn split_buttons(text: &str) -> (String, Option<String>) {
     (clean, btn)
 }
 
+/// Parse stored filter/notes/snips button JSON — `split_buttons` stores
+/// a flat `[[label, url], …]` list — into markup rows (one button per
+/// row), for `Responder::send_markup_to`.
+pub fn buttons_from_json(button_json: &str) -> Vec<Vec<InlineButton>> {
+    let pairs: Vec<(String, String)> = serde_json::from_str(button_json).unwrap_or_default();
+    pairs
+        .into_iter()
+        .map(|(label, url)| vec![InlineButton::url(label, url)])
+        .collect()
+}
+
+/// Send a stored entry's text with its inline buttons, when it has any.
+/// Returns `Ok(true)` when a buttoned send happened.
+pub async fn send_with_buttons(ctx: &Ctx, entry: &FilterEntry) -> Result<bool> {
+    let Some(button_json) = entry.button.as_deref() else {
+        return Ok(false);
+    };
+    let text = entry.msg.clone().unwrap_or_default();
+    let rows = buttons_from_json(button_json);
+    ctx.responder
+        .send_markup_to(ctx.chat_id, &text, rows)
+        .await?;
+    Ok(true)
+}
+
 fn key(chat_id: i64, word: &str) -> String {
     format!("{chat_id}:{word}")
 }
 
 async fn addfilter(ctx: &Ctx) -> Result<()> {
     let word = ctx.args.trim().to_lowercase();
-    let Some(reply_text) = ctx.reply_to_text.clone() else {
-        if ctx.reply_to_id.is_some() {
-            // TODO(responder-op): download the replied message's media
-            // (telegraph upload for pics/gifs/videos, bot file id otherwise)
-            // (Python: filter.py:af).
-            return Err(Error::Other(
-                "download replied media for a filter requires a binary Responder op (Python: filter.py:af)".to_string(),
-            ));
-        }
+    // The reply text is on `Ctx` when the binary filled it; otherwise
+    // re-fetch the reply through `message_summary`. A media-only reply
+    // still needs the media-kind branch (Telegraph upload for
+    // pics/gifs/videos, bot file id otherwise), which no trait op
+    // provides, so it stays an honest error.
+    let reply_text: Option<String> = match ctx.reply_to_text.clone() {
+        Some(text) => Some(text),
+        None => match ctx.reply_to_id {
+            Some(reply_id) => {
+                match ctx
+                    .responder
+                    .message_summary(ctx.chat_id, reply_id as i32)
+                    .await?
+                {
+                    Some(summary) if !summary.text.is_empty() => Some(summary.text),
+                    Some(summary) if summary.has_media => {
+                        return Err(Error::Other(
+                            "download replied media for a filter requires a binary Responder op (media kind + Telegraph upload / bot file id) (Python: filter.py:af)".to_string(),
+                        ));
+                    }
+                    _ => None,
+                }
+            }
+            None => None,
+        },
+    };
+    let Some(reply_text) = reply_text else {
         ctx.reply(&ctx.get_str("flr_1")).await?;
         return Ok(());
     };
@@ -172,11 +216,13 @@ pub async fn check_filter(ctx: &Ctx) -> Result<bool> {
             continue;
         };
         if entry.button.is_some() {
-            // TODO(responder-op): send the stored reply with its inline
-            // buttons (Python: filter.py:filter_func, `something(...)`).
-            return Err(Error::Other(
-                "send filter reply with inline buttons requires a binary Responder op (Python: filter.py:filter_func)".to_string(),
-            ));
+            // Stored reply with inline buttons — delivered directly with
+            // `send_markup_to` (Python `something(...)` goes through the
+            // assistant inline flow, whose `STUFF` entry plugins cannot
+            // register; the visible result is the same).
+            if send_with_buttons(ctx, &entry).await? {
+                return Ok(true);
+            }
         }
         if entry.media.is_some() {
             // TODO(responder-op): send the stored reply with its media
