@@ -4128,6 +4128,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "ultroid-assistant"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "serde",
+ "serde_json",
+ "tokio",
+ "ultroid-core",
+ "ultroid-rich",
+]
+
+[[package]]
 name = "ultroid-core"
 version = "0.1.0"
 dependencies = [
