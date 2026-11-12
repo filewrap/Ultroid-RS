@@ -3,6 +3,7 @@ members = [
     "crates/ultroid-core",
     "crates/ultroid-rich",
     "crates/ultroid-vc",
+    "crates/ultroid-agent",
 ]
 # NOTE (build order, user rule "new functions first"): `ultroid-rs` (binary),
 # `ultroid-plugins`, `ultroid-assistant`, `ultroid-agent` and `ultroid-web`
