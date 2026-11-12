@@ -19,7 +19,7 @@ ultroid-rs/                        # Cargo workspace (this repo)
     ultroid-rich/        # RichDoc -> grammers InputRichMessage; bot-only RichSender
     ultroid-plugins/     # all 102 plugins, one module per Python file
     ultroid-assistant/   # assistant-bot handlers (assistant/*.py)
-    ultroid-vc/          # voice-chat queue/resolver/download; audio engine stubbed honestly
+    ultroid-vc/          # voice chat: grammers phone.* bridge + ntgcalls-direct engine (3.0.7)
     ultroid-agent/       # AI agent providers/tools/mini (pyUltroid/agent/*)
     ultroid-web/         # setup server (pyUltroid/webserver/* + server.py)
 ```
@@ -219,3 +219,45 @@ Handlers do real work: real HTTP calls via `ctx.http`, real DB via
 Where an external service needs a key the sandbox lacks, the handler
 returns a clear `Error::Config` naming the env var — it does not invent
 data.
+
+## Build status (2026-11-13)
+
+Committed (local, not yet pushed): `4d436fe` core+rich+vc,
+`e4f4b14` agent, `d2c7886` web, `8c23758` assistant,
+`3b56e60` plugins wave B (15 small-media plugins). Binary crate
+(`ultroid-rs/`) written and workspace `cargo check` clean.
+All check clean; `cargo test` passes for core/vc/web.
+
+In flight: VC resolver/downloader modules (`resolver`, `youtube`,
+`api`, `downloader`, `dl_helper`, `httpx`, `saavn`, `jiosaavn`,
+`spotify`, `yt`) and plugin waves A, C, D, E, F, G (87 plugins).
+
+Binary crate (`ultroid-rs/`): `main.rs` (setup gate → config → DB →
+registry → clients → VC engine → mini-app server → update loops),
+`clients.rs` (SenderPool connect + dialog warm-up + bot sign-in),
+`login.rs` (interactive phone-code/2FA), `responder.rs`
+(GrammersResponder; user client refuses rich with `RichOnlyBot`).
+Callback routing tries the 10 assistant `handle_callback` handlers
+in order, then answers unknown data with exactly "🖐️" (Phase-10
+ruling). VC raw updates fan out through `Bridge::handle_raw_update`
+with chat ids resolved from `Update::GroupCall.peer` or
+`Bridge::chat_id_for_call` (reverse lookup by call id).
+
+VC threading: ntgcalls is `Send` but NOT `Sync`, so `Arc<Engine>`
+can never cross a thread boundary — the engine is built and run
+inside its own OS thread on a current-thread runtime; only `Send`
+handles (the `Bridge`, the DB) move across. Plugin VC commands
+cannot reach the engine through `Shared` for the same reason; they
+need an actor-style handle in the responder-op pass.
+
+Known gaps to close before push (integration pass, after waves land):
+1. InlineQuery/InlineSend/GuestChatQuery routing to the
+   `plugins::inline` engine (wave C defines its binary hook).
+2. `TODO(responder-op)` sites in plugins: extend the `Responder`
+   trait with the raw-MTProto operations plugins need (admin actions,
+   message/media fetch, chat info), implement them in the binary's
+   responder, and wire each site. Deferred deps decided then too:
+   `imageproc` + `ab_glyph` (text-on-image), `rqrr` (QR decode).
+3. `_help.py` plugin vs `Registry::command_names()` (help listing).
+4. `cargo build` (full workspace) + `cargo test`, README counts
+   finalised, then push to filewrap/Ultroid-RS with ls-remote verify.
