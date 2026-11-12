@@ -68,7 +68,7 @@ pub async fn night_chats(ctx: &Ctx) -> Result<Vec<i64>> {
 }
 
 async fn set_night_chats(ctx: &Ctx, chats: &[i64]) -> Result<()> {
-    db_set_json(&*ctx.db, "NIGHT_CHATS", chats).await
+    db_set_json(&*ctx.db, "NIGHT_CHATS", &chats.to_vec()).await
 }
 
 async fn set_time(ctx: &Ctx) -> Result<()> {

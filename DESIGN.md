@@ -228,11 +228,16 @@ Committed (local, not yet pushed): `4d436fe` core+rich+vc,
 `5600ca9` binary crate. VC resolver/downloader modules
 (`resolver`, `youtube`, `api`, `downloader`, `dl_helper`, `httpx`,
 `saavn`, `jiosaavn`, `spotify`, `yt`) and plugin waves A (20),
-C (8), D (8), G (29) are written, wired (80 plugins on the
-registry), and workspace `cargo check` clean — commit pending in
-this turn. All check clean; `cargo test` passes for core/vc/web.
+C (8), D (8), G (29) are written, wired, and committed; waves
+E (AI/chat, 6) and F (bot core, 16) are written and wired (all
+102 plugins on the registry) and workspace `cargo check` is clean
+— commit pending in this turn. All check clean; `cargo test`
+passes for core/vc/web.
 
-In flight: plugin waves E (AI/chat, 6) and F (bot core, 16).
+Remaining before push (integration pass): inline-query routing to
+the `plugins::inline` engine, the `TODO(responder-op)` extension
+pass (370 sites), `_help.py` vs `command_names()`, `cargo build` +
+`cargo test`, README counts finalised.
 
 Binary crate (`ultroid-rs/`): `main.rs` (setup gate → config → DB →
 registry → clients → VC engine → mini-app server → update loops),

@@ -10,28 +10,43 @@
 
 use ultroid_core::Registry;
 
-// Waves A (moderation/admin), B (small media), C (big media + inline
-// + web), D (docs/media + plugin mgmt), G (misc) — 80 modules, all
-// ported. Waves E (AI/chat) and F (bot core) land separately when
-// their workers report.
+// All 102 plugins, one module per Python plugin file (waves A-G).
+// Every module exposes `pub fn register(registry: &mut Registry)`;
+// `inline` registers nothing (the binary owns the inline dispatcher).
 pub mod admintools;
+pub mod afk;
+pub mod antiflood;
 pub mod asstcmd;
 pub mod audiotools;
 pub mod autoban;
 pub mod beautify;
 pub mod blacklist;
 pub mod boosts;
+pub mod bot;
 pub mod bot2bot;
+pub mod brain;
+pub mod broadcast;
+pub mod business;
+pub mod button;
+pub mod button_pilot;
 pub mod calculator;
 pub mod channelhacks;
 pub mod chatactions;
+pub mod chatbot;
+pub mod chats;
 pub mod cleanaction;
 pub mod compressor;
 pub mod converter;
 pub mod core;
+pub mod database;
+pub mod devtools;
 pub mod downloadupload;
+pub mod echo;
 pub mod emojis;
+pub mod ephemeral;
+pub mod eval;
 pub mod extra;
+pub mod factcheck;
 pub mod fakeaction;
 pub mod fileshare;
 pub mod filter;
@@ -48,6 +63,7 @@ pub mod glitch;
 pub mod globaltools;
 pub mod greetings;
 pub mod guest_manager;
+pub mod help;
 pub mod howtocuddleme;
 pub mod imaging;
 pub mod inline;
@@ -55,12 +71,17 @@ pub mod listeners;
 pub mod locks;
 pub mod logo;
 pub mod mediatools;
+pub mod misc;
+pub mod mute;
+pub mod nightmode;
 pub mod notes;
 pub mod other;
 pub mod pdftools;
+pub mod pmpermit;
 pub mod polls;
 pub mod profile;
 pub mod qrcode;
+pub mod rebrand;
 pub mod redis;
 pub mod resize;
 pub mod schedulemsg;
@@ -76,8 +97,10 @@ pub mod tag;
 pub mod tools;
 pub mod topics;
 pub mod tracer;
+pub mod ultroid;
 pub mod usage;
 pub mod userlogs;
+pub mod utilities;
 pub mod variables;
 pub mod vcmusic;
 pub mod vctools;
@@ -89,6 +112,7 @@ pub mod webtools;
 pub mod webupload;
 pub mod words;
 pub mod writer;
+pub mod wspr;
 pub mod youtube;
 pub mod ziptools;
 
@@ -98,23 +122,39 @@ pub mod ziptools;
 /// once its real port exists — never a placeholder.
 pub fn register(registry: &mut Registry) {
     admintools::register(registry);
+    afk::register(registry);
+    antiflood::register(registry);
     asstcmd::register(registry);
     audiotools::register(registry);
     autoban::register(registry);
     beautify::register(registry);
     blacklist::register(registry);
-    bot2bot::register(registry);
     boosts::register(registry);
+    bot::register(registry);
+    bot2bot::register(registry);
+    brain::register(registry);
+    broadcast::register(registry);
+    business::register(registry);
+    button::register(registry);
+    button_pilot::register(registry);
     calculator::register(registry);
     channelhacks::register(registry);
     chatactions::register(registry);
+    chatbot::register(registry);
+    chats::register(registry);
     cleanaction::register(registry);
     compressor::register(registry);
     converter::register(registry);
     core::register(registry);
+    database::register(registry);
+    devtools::register(registry);
     downloadupload::register(registry);
+    echo::register(registry);
     emojis::register(registry);
+    ephemeral::register(registry);
+    eval::register(registry);
     extra::register(registry);
+    factcheck::register(registry);
     fakeaction::register(registry);
     fileshare::register(registry);
     filter::register(registry);
@@ -131,6 +171,7 @@ pub fn register(registry: &mut Registry) {
     globaltools::register(registry);
     greetings::register(registry);
     guest_manager::register(registry);
+    help::register(registry);
     howtocuddleme::register(registry);
     imaging::register(registry);
     inline::register(registry);
@@ -138,12 +179,17 @@ pub fn register(registry: &mut Registry) {
     locks::register(registry);
     logo::register(registry);
     mediatools::register(registry);
+    misc::register(registry);
+    mute::register(registry);
+    nightmode::register(registry);
     notes::register(registry);
     other::register(registry);
     pdftools::register(registry);
+    pmpermit::register(registry);
     polls::register(registry);
     profile::register(registry);
     qrcode::register(registry);
+    rebrand::register(registry);
     redis::register(registry);
     resize::register(registry);
     schedulemsg::register(registry);
@@ -159,8 +205,10 @@ pub fn register(registry: &mut Registry) {
     tools::register(registry);
     topics::register(registry);
     tracer::register(registry);
+    ultroid::register(registry);
     usage::register(registry);
     userlogs::register(registry);
+    utilities::register(registry);
     variables::register(registry);
     vcmusic::register(registry);
     vctools::register(registry);
@@ -172,6 +220,7 @@ pub fn register(registry: &mut Registry) {
     webupload::register(registry);
     words::register(registry);
     writer::register(registry);
+    wspr::register(registry);
     youtube::register(registry);
     ziptools::register(registry);
 }
