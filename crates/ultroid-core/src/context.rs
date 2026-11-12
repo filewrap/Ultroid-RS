@@ -5,6 +5,7 @@ use crate::config::Config;
 use crate::db::Database;
 use crate::error::{Error, Result};
 use crate::rich::RichDoc;
+use crate::router::Registry;
 use crate::strings::Strings;
 use async_trait::async_trait;
 use std::path::Path;
@@ -37,6 +38,9 @@ pub trait Responder: Send + Sync {
     async fn reply(&self, text: &str) -> Result<i64>;
     async fn reply_html(&self, html: &str) -> Result<i64>;
     async fn edit(&self, msg_id: i64, text: &str) -> Result<()>;
+    /// Edit a message with Telegram-safe HTML (`<b> <i> <code> <a>`,
+    /// same subset as `reply_html`).
+    async fn edit_html(&self, msg_id: i64, html: &str) -> Result<()>;
     async fn delete(&self, msg_id: i64) -> Result<()>;
     async fn send_file(&self, path: &Path, caption: &str) -> Result<i64>;
     async fn send_rich(&self, doc: &RichDoc) -> Result<i64>;
@@ -72,6 +76,8 @@ pub struct Ctx {
     pub lang: String,
     pub strings: Arc<Strings>,
     pub client_kind: ClientKind,
+    /// Shared command registry (powers `.help <plugin>` lookups).
+    pub registry: Arc<Registry>,
 }
 
 impl Ctx {
@@ -85,6 +91,10 @@ impl Ctx {
 
     pub async fn edit(&self, msg_id: i64, text: &str) -> Result<()> {
         self.responder.edit(msg_id, text).await
+    }
+
+    pub async fn edit_html(&self, msg_id: i64, html: &str) -> Result<()> {
+        self.responder.edit_html(msg_id, html).await
     }
 
     pub async fn delete(&self, msg_id: i64) -> Result<()> {

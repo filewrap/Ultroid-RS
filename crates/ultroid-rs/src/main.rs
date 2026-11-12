@@ -62,6 +62,7 @@ async fn main() -> anyhow::Result<()> {
 
     let mut registry = Registry::new();
     ultroid_plugins::register(&mut registry);
+    registry.set_plugin("assistant");
     ultroid_assistant::register(&mut registry);
     let registry = Arc::new(registry);
     tracing::info!(
@@ -315,6 +316,7 @@ async fn handle_message(
         lang: shared.config.lang.clone(),
         strings: shared.strings.clone(),
         client_kind: kind,
+        registry: shared.registry.clone(),
     };
     match shared.registry.dispatch(&mut ctx).await {
         Ok(_) => Ok(()),
@@ -380,6 +382,7 @@ async fn handle_callback(
         lang: shared.config.lang.clone(),
         strings: shared.strings.clone(),
         client_kind: kind,
+        registry: shared.registry.clone(),
     };
 
     // Each assistant handler reports whether it owned the data.

@@ -257,6 +257,16 @@ handles (the `Bridge`, the DB) move across. Plugin VC commands
 cannot reach the engine through `Shared` for the same reason; they
 need an actor-style handle in the responder-op pass.
 
+Help listing: `Registry::set_plugin` tags each module's commands
+(`plugins::register` sets it per module; the binary sets
+`"assistant"` before the assistant's register); `help_listing()`
+groups by plugin in registration order and `Ctx` carries an
+`Arc<Registry>`, so `.help <plugin|command>` renders for real
+(`plugins::help`, porting `_plugin_help_markup` +
+`command_aliases`/`command_syntax`/`command_matches`, edited via
+the new `Responder::edit_html`). Bare `.help` still needs the
+assistant inline-query op (responder-op pass).
+
 Known gaps to close before push (integration pass, after waves land):
 1. InlineQuery/InlineSend/GuestChatQuery routing to the
    `plugins::inline` engine (wave C defines its binary hook).
@@ -265,6 +275,7 @@ Known gaps to close before push (integration pass, after waves land):
    message/media fetch, chat info), implement them in the binary's
    responder, and wire each site. Deferred deps decided then too:
    `imageproc` + `ab_glyph` (text-on-image), `rqrr` (QR decode).
-3. `_help.py` plugin vs `Registry::command_names()` (help listing).
+3. Bare `.help` needs the assistant inline-query op (responder-op
+   pass); `.help <plugin|command>` is wired on the help listing.
 4. `cargo build` (full workspace) + `cargo test`, README counts
    finalised, then push to filewrap/Ultroid-RS with ls-remote verify.

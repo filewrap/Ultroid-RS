@@ -25,6 +25,9 @@ impl Responder for NullResponder {
     async fn edit(&self, _m: i64, _t: &str) -> Result<()> {
         Ok(())
     }
+    async fn edit_html(&self, _m: i64, _h: &str) -> Result<()> {
+        Ok(())
+    }
     async fn delete(&self, _m: i64) -> Result<()> {
         Ok(())
     }
@@ -122,6 +125,7 @@ fn test_ctx(text: &str, owner: bool) -> Ctx {
         lang: "en".into(),
         strings: Strings::load("en"),
         client_kind: ClientKind::User,
+        registry: Arc::new(Registry::new()),
     }
 }
 

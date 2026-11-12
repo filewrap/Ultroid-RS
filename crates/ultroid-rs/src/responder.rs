@@ -87,6 +87,14 @@ impl Responder for GrammersResponder {
         Ok(())
     }
 
+    async fn edit_html(&self, msg_id: i64, html: &str) -> Result<()> {
+        self.client
+            .edit_message(self.peer, msg_id as i32, InputMessage::new().html(html))
+            .await
+            .map_err(telegram)?;
+        Ok(())
+    }
+
     async fn delete(&self, msg_id: i64) -> Result<()> {
         self.client
             .delete_messages(self.peer, &[msg_id as i32])
