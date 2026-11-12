@@ -4,11 +4,16 @@
 use crate::config::Config;
 use crate::db::Database;
 use crate::error::{Error, Result};
+use crate::ops::{
+    AdminRights, BannedRights, BoostStatus, ChatSummary, DialogInfo, MessageSummary,
+    ParticipantInfo, StickerSetInfo, ThemeInfo, UserSummary, WallpaperInfo,
+};
 use crate::rich::RichDoc;
 use crate::router::Registry;
 use crate::strings::Strings;
+use crate::tg::InlineButton;
 use async_trait::async_trait;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,6 +51,171 @@ pub trait Responder: Send + Sync {
     async fn send_rich(&self, doc: &RichDoc) -> Result<i64>;
     /// Chat id this responder targets.
     fn chat_id(&self) -> i64;
+
+    // -- Extended Telegram operations (the "responder-op" surface) --------
+    // Every method below is a real Telegram operation implemented in the
+    // binary's `GrammersResponder` over grammers raw invokes / high-level
+    // calls. Dialog ids are bot API dialog ids (`PeerId::bot_api_dialog_id`).
+    // `chat_id`/`msg_id` pairs identify messages; `dest` paths are local
+    // filesystem paths owned by the caller.
+
+    /// Download the media attached to a message into `dest` (parent dir
+    /// must exist). Returns the written path. Errors when the message has
+    /// no downloadable media.
+    async fn download_media(&self, chat_id: i64, msg_id: i32, dest: &Path) -> Result<PathBuf>;
+    /// Fetch one message's sender / text / media presence.
+    async fn message_summary(&self, chat_id: i64, msg_id: i32) -> Result<Option<MessageSummary>>;
+    /// Resolve a user by username (with or without `@`) or numeric id.
+    async fn resolve_user(&self, query: &str) -> Result<UserSummary>;
+    /// Full user info (`users.GetFullUser`).
+    async fn user_full(&self, dialog_id: i64) -> Result<UserSummary>;
+    /// Chat / channel info (title, username, kind).
+    async fn chat_info(&self, dialog_id: i64) -> Result<ChatSummary>;
+    /// The logged-in account itself.
+    async fn me(&self) -> Result<UserSummary>;
+    /// All dialogs (chat list), in server order.
+    async fn dialogs(&self) -> Result<Vec<DialogInfo>>;
+
+    /// Send a plain-text message to an arbitrary peer. Returns the new id.
+    async fn send_to(&self, dialog_id: i64, text: &str) -> Result<i64>;
+    /// Send an HTML message to an arbitrary peer. Returns the new id.
+    async fn send_html_to(&self, dialog_id: i64, html: &str) -> Result<i64>;
+    /// Send a local file to an arbitrary peer. Returns the new id.
+    async fn send_file_to(&self, dialog_id: i64, path: &Path, caption: &str) -> Result<i64>;
+    /// Send a text message with inline buttons to an arbitrary peer.
+    async fn send_markup_to(
+        &self,
+        dialog_id: i64,
+        text: &str,
+        buttons: Vec<Vec<InlineButton>>,
+    ) -> Result<i64>;
+    /// Send a poll (`InputMediaPoll`). Returns the new message id.
+    async fn send_poll(
+        &self,
+        dialog_id: i64,
+        question: &str,
+        options: Vec<String>,
+        multiple: bool,
+        quiz: bool,
+    ) -> Result<i64>;
+    /// Send a plain-text message scheduled `delay_secs` in the future.
+    async fn send_scheduled(&self, dialog_id: i64, text: &str, delay_secs: u64) -> Result<i64>;
+    /// Send a plain-text message with a message effect (`effect_id` is the
+    /// numeric effect id from `availableEffects`).
+    async fn send_effect(&self, dialog_id: i64, text: &str, effect_id: i64) -> Result<i64>;
+    /// Send a live location (`InputMediaGeoLive`).
+    async fn send_geo_live(
+        &self,
+        dialog_id: i64,
+        latitude: f64,
+        longitude: f64,
+        period_secs: i32,
+    ) -> Result<i64>;
+    /// Forward one message to another peer. Returns the new message id.
+    async fn forward_to(&self, from_dialog_id: i64, msg_id: i32, to_dialog_id: i64) -> Result<i64>;
+    /// Delete messages in an arbitrary peer.
+    async fn delete_from(&self, dialog_id: i64, msg_ids: &[i32]) -> Result<()>;
+    /// Pin a message (`messages.UpdatePinnedMessage`).
+    async fn pin_message(&self, dialog_id: i64, msg_id: i32, silent: bool) -> Result<()>;
+    /// Unpin one message.
+    async fn unpin_message(&self, dialog_id: i64, msg_id: i32) -> Result<()>;
+    /// Unpin all messages in a peer.
+    async fn unpin_all(&self, dialog_id: i64) -> Result<()>;
+
+    /// Ban a participant (`channels.EditBanned`).
+    async fn ban_user(&self, chat_id: i64, user_id: i64, rights: BannedRights) -> Result<()>;
+    /// Unban a participant (empty banned rights).
+    async fn unban_user(&self, chat_id: i64, user_id: i64) -> Result<()>;
+    /// Promote/demote a participant (`channels.EditAdmin`).
+    async fn promote_user(
+        &self,
+        chat_id: i64,
+        user_id: i64,
+        rights: AdminRights,
+        rank: &str,
+    ) -> Result<()>;
+    /// Set a chat's default banned rights.
+    async fn edit_default_rights(&self, chat_id: i64, rights: BannedRights) -> Result<()>;
+    /// One page of participants (`channels.GetParticipants`, recent filter);
+    /// returns the page and the server-reported total count.
+    async fn participants(
+        &self,
+        chat_id: i64,
+        limit: i32,
+        offset: i32,
+    ) -> Result<(Vec<ParticipantInfo>, i32)>;
+
+    /// Move a dialog in/out of the archive folder.
+    async fn set_archived(&self, dialog_id: i64, archived: bool) -> Result<()>;
+
+    /// Update own profile (`account.UpdateProfile`; `None` = leave as is).
+    async fn update_profile(
+        &self,
+        first_name: Option<&str>,
+        last_name: Option<&str>,
+        about: Option<&str>,
+    ) -> Result<()>;
+    /// Upload a local image as the own profile photo.
+    async fn upload_profile_photo(&self, path: &Path) -> Result<()>;
+    /// Delete own profile photos, most recent first; returns how many
+    /// were deleted. `limit <= 0` means all.
+    async fn delete_profile_photos(&self, limit: i32) -> Result<i32>;
+    /// Download a user's profile photos (most recent first) into `dir`
+    /// as `profile-<n>.jpg`; returns the written paths.
+    async fn download_profile_photos(
+        &self,
+        dialog_id: i64,
+        dir: &Path,
+        limit: i32,
+    ) -> Result<Vec<PathBuf>>;
+
+    /// Run an inline query against a bot and click the first result into
+    /// `chat_id` (`messages.GetInlineBotResults` + `SendInlineBotResult`
+    /// with `reply_to`, mirroring Telethon's `result.click(...)`).
+    /// `bot_dialog_id` is the bot's bot API dialog id.
+    async fn inline_query_click(
+        &self,
+        bot_dialog_id: i64,
+        query: &str,
+        chat_id: i64,
+        reply_to: Option<i32>,
+    ) -> Result<()>;
+
+    /// Boost status of a channel (`premium.GetBoostsStatus`).
+    async fn boost_status(&self, dialog_id: i64) -> Result<BoostStatus>;
+    /// Give one boost slot to a channel (`premium.ApplyBoost`).
+    async fn apply_boost(&self, dialog_id: i64) -> Result<()>;
+
+    /// Delete own stories (`stories.DeleteStories`).
+    async fn delete_stories(&self, story_ids: Vec<i32>) -> Result<()>;
+    /// Toggle story stealth mode (`stories.ActivateStealthMode`).
+    async fn set_story_stealth(&self, enabled: bool) -> Result<()>;
+    /// Post the replied message's media as a story from the own account
+    /// (`stories.SendStory`, public visibility).
+    async fn post_story(&self, chat_id: i64, msg_id: i32, caption: &str) -> Result<()>;
+
+    /// The own account's sticker sets (`messages.GetMyStickers`).
+    async fn my_sticker_sets(&self) -> Result<Vec<StickerSetInfo>>;
+    /// One sticker set by short name (`messages.GetStickerSet`).
+    async fn sticker_set(&self, short_name: &str) -> Result<StickerSetInfo>;
+    /// Add the document attached to a message to a sticker set
+    /// (`stickers.AddStickerToSet`), with the given emoji.
+    async fn add_document_to_sticker_set(
+        &self,
+        chat_id: i64,
+        msg_id: i32,
+        short_name: &str,
+        emoji: &str,
+    ) -> Result<()>;
+
+    /// Installed + available wallpapers (`account.GetWallPapers`).
+    async fn list_wallpapers(&self) -> Result<Vec<WallpaperInfo>>;
+    /// Upload a local image as a (saved) wallpaper.
+    async fn upload_wallpaper(&self, path: &Path) -> Result<()>;
+    /// Available chat themes (`account.GetChatThemes`).
+    async fn list_themes(&self) -> Result<Vec<ThemeInfo>>;
+    /// Apply a chat theme by slug (`messages.SetChatTheme`).
+    async fn set_chat_theme(&self, dialog_id: i64, theme_slug: &str) -> Result<()>;
 }
 
 /// The context handed to every command handler.
@@ -64,6 +234,9 @@ pub struct Ctx {
     pub message_id: i64,
     pub reply_to_id: Option<i64>,
     pub reply_to_text: Option<String>,
+    /// Bot API dialog id of the replied message's sender, when the event
+    /// replies to a message (filled by the binary from the reply fetch).
+    pub reply_to_sender_id: Option<i64>,
     pub is_owner: bool,
     pub is_sudo: bool,
     pub is_dev: bool,
@@ -78,6 +251,13 @@ pub struct Ctx {
     pub client_kind: ClientKind,
     /// Shared command registry (powers `.help <plugin>` lookups).
     pub registry: Arc<Registry>,
+    /// Bot API dialog id of the assistant bot, when connected
+    /// (for inline-query ops: `.help`, `.gif`, `.icalc`).
+    pub asst_dialog_id: Option<i64>,
+    /// A responder bound to the assistant-bot client for the same peer,
+    /// when the assistant is connected. Used by commands that must send
+    /// as the assistant bot (bot2bot replies, pmpermit log notes).
+    pub asst: Option<Arc<dyn Responder>>,
 }
 
 impl Ctx {

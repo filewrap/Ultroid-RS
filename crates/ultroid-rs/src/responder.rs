@@ -7,16 +7,13 @@
 //! with [`Error::RichOnlyBot`] (the `Ctx::send_rich_or_plain` fallback
 //! turns that refusal into a plain-text send, exactly like Python).
 
-use async_trait::async_trait;
 use grammers_client::{
     Client,
-    message::InputMessage,
     session::types::{PeerAuth, PeerRef},
 };
-use std::path::Path;
-use ultroid_core::{ClientKind, Error, Responder, Result, rich::RichDoc};
+use ultroid_core::{ClientKind, Error};
 
-fn telegram<E: std::fmt::Display>(e: E) -> Error {
+pub(crate) fn telegram<E: std::fmt::Display>(e: E) -> Error {
     Error::Telegram(e.to_string())
 }
 
@@ -57,79 +54,24 @@ impl GrammersResponder {
             kind,
         }
     }
-}
 
-#[async_trait]
-impl Responder for GrammersResponder {
-    async fn reply(&self, text: &str) -> Result<i64> {
-        let msg = self
-            .client
-            .send_message(self.peer, InputMessage::new().text(text))
-            .await
-            .map_err(telegram)?;
-        Ok(msg.id() as i64)
+    /// The underlying client (for the extended ops in `responder_ops.rs`).
+    pub(crate) fn client(&self) -> &Client {
+        &self.client
     }
 
-    async fn reply_html(&self, html: &str) -> Result<i64> {
-        let msg = self
-            .client
-            .send_message(self.peer, InputMessage::new().html(html))
-            .await
-            .map_err(telegram)?;
-        Ok(msg.id() as i64)
+    /// The peer this responder targets.
+    pub(crate) fn peer(&self) -> PeerRef {
+        self.peer
     }
 
-    async fn edit(&self, msg_id: i64, text: &str) -> Result<()> {
-        self.client
-            .edit_message(self.peer, msg_id as i32, InputMessage::new().text(text))
-            .await
-            .map_err(telegram)?;
-        Ok(())
+    /// Which client kind this responder runs on.
+    pub(crate) fn kind(&self) -> ClientKind {
+        self.kind
     }
 
-    async fn edit_html(&self, msg_id: i64, html: &str) -> Result<()> {
-        self.client
-            .edit_message(self.peer, msg_id as i32, InputMessage::new().html(html))
-            .await
-            .map_err(telegram)?;
-        Ok(())
-    }
-
-    async fn delete(&self, msg_id: i64) -> Result<()> {
-        self.client
-            .delete_messages(self.peer, &[msg_id as i32])
-            .await
-            .map_err(telegram)?;
-        Ok(())
-    }
-
-    async fn send_file(&self, path: &Path, caption: &str) -> Result<i64> {
-        let uploaded = self.client.upload_file(path).await.map_err(telegram)?;
-        let msg = self
-            .client
-            .send_message(self.peer, InputMessage::new().text(caption).file(uploaded))
-            .await
-            .map_err(telegram)?;
-        Ok(msg.id() as i64)
-    }
-
-    async fn send_rich(&self, doc: &RichDoc) -> Result<i64> {
-        match self.kind {
-            ClientKind::AsstBot => {
-                let sender = ultroid_rich::RichSender::new_bot(self.client.clone());
-                let sent = sender.send_rich(self.peer, doc).await.map_err(|e| {
-                    // A failed rich send must keep the real server reason
-                    // (and never silently fall back to plain text here —
-                    // the caller decides the fallback).
-                    Error::Telegram(e.to_string())
-                })?;
-                Ok(sent.id() as i64)
-            }
-            _ => Err(Error::RichOnlyBot),
-        }
-    }
-
-    fn chat_id(&self) -> i64 {
+    /// The chat id this responder targets.
+    pub(crate) fn chat_id_value(&self) -> i64 {
         self.chat_id
     }
 }

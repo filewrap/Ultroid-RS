@@ -22,6 +22,7 @@ grammers-mtsender.workspace = true
 grammers-tl-types.workspace = true
 tokio.workspace = true
 async-trait.workspace = true
+rand.workspace = true
 reqwest.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

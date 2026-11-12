@@ -15,6 +15,7 @@
 mod clients;
 mod login;
 mod responder;
+mod responder_ops;
 
 use grammers_client::{
     Client,
@@ -42,6 +43,10 @@ struct Shared {
     guests: GuestMode,
     http: reqwest::Client,
     bridge: Option<Arc<Bridge>>,
+    /// The assistant-bot client, when connected (for asst responders).
+    asst_client: Option<Client>,
+    /// Bot API dialog id of the assistant bot, when connected.
+    asst_dialog_id: Option<i64>,
 }
 
 #[tokio::main(flavor = "multi_thread")]
@@ -96,10 +101,24 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // Assistant bot client.
+    let mut asst_client: Option<Client> = None;
+    let mut asst_dialog_id: Option<i64> = None;
     if let Some(token) = &config.bot_token {
         let connected =
             clients::connect(&config, &config.session_path("asst"), ClientKind::AsstBot).await?;
         clients::bot_sign_in(&connected.client, &config, token).await?;
+        let me = connected
+            .client
+            .get_me()
+            .await
+            .map_err(|e| Error::Telegram(e.to_string()))?;
+        asst_dialog_id = Some(me.id().bot_api_dialog_id_unchecked());
+        tracing::info!(
+            "assistant bot signed in as @{} (id {})",
+            me.username().unwrap_or("?"),
+            asst_dialog_id.unwrap_or(0)
+        );
+        asst_client = Some(connected.client.clone());
         connected_clients.push(connected);
     }
 
@@ -155,6 +174,8 @@ async fn main() -> anyhow::Result<()> {
         guests,
         http: reqwest::Client::new(),
         bridge,
+        asst_client,
+        asst_dialog_id,
     });
 
     let mut handles = Vec::new();
@@ -257,15 +278,16 @@ async fn handle_message(
         .unwrap_or(0);
     let text = msg.text().to_string();
     let reply_to_id = msg.reply_to_message_id().map(|i| i as i64);
-    let reply_to_text = match msg.reply_to_message_id() {
-        Some(_) => client
-            .get_reply_to_message(msg)
-            .await
-            .ok()
-            .flatten()
-            .map(|m| m.text().to_string()),
+    // One fetch serves both the reply text and the reply sender id.
+    let reply_msg = match msg.reply_to_message_id() {
+        Some(_) => client.get_reply_to_message(msg).await.ok().flatten(),
         None => None,
     };
+    let reply_to_text = reply_msg.as_ref().map(|m| m.text().to_string());
+    let reply_to_sender_id = reply_msg
+        .as_ref()
+        .and_then(|m| m.sender_id())
+        .and_then(|p| p.bot_api_dialog_id());
 
     let peer_ref = match msg.peer_ref().await {
         Ok(Some(peer)) => peer,
@@ -280,6 +302,16 @@ async fn handle_message(
         chat_id,
         kind,
     ));
+    // A responder bound to the assistant-bot client for the same peer,
+    // for commands that must send as the assistant (bot2bot, pmpermit…).
+    let asst: Option<Arc<dyn ultroid_core::Responder>> = shared.asst_client.as_ref().map(|ac| {
+        Arc::new(GrammersResponder::new(
+            ac.clone(),
+            peer_ref,
+            chat_id,
+            ClientKind::AsstBot,
+        )) as Arc<dyn ultroid_core::Responder>
+    });
 
     // `listen()` waiters see every message, matched or not.
     shared
@@ -304,6 +336,7 @@ async fn handle_message(
         message_id: msg.id() as i64,
         reply_to_id,
         reply_to_text,
+        reply_to_sender_id,
         is_owner: sender_id != 0 && sender_id == shared.config.owner_id,
         is_sudo: shared.config.is_sudo(sender_id),
         is_dev: shared.config.is_dev(sender_id),
@@ -317,6 +350,8 @@ async fn handle_message(
         strings: shared.strings.clone(),
         client_kind: kind,
         registry: shared.registry.clone(),
+        asst_dialog_id: shared.asst_dialog_id,
+        asst,
     };
     match shared.registry.dispatch(&mut ctx).await {
         Ok(_) => Ok(()),
@@ -359,6 +394,14 @@ async fn handle_callback(
         chat_id,
         kind,
     ));
+    let asst: Option<Arc<dyn ultroid_core::Responder>> = shared.asst_client.as_ref().map(|ac| {
+        Arc::new(GrammersResponder::new(
+            ac.clone(),
+            peer_ref,
+            chat_id,
+            ClientKind::AsstBot,
+        )) as Arc<dyn ultroid_core::Responder>
+    });
     let mut ctx = Ctx {
         text: data.clone(),
         args: String::new(),
@@ -370,6 +413,7 @@ async fn handle_callback(
         message_id,
         reply_to_id: None,
         reply_to_text: None,
+        reply_to_sender_id: None,
         is_owner: sender_id != 0 && sender_id == shared.config.owner_id,
         is_sudo: shared.config.is_sudo(sender_id),
         is_dev: shared.config.is_dev(sender_id),
@@ -383,6 +427,8 @@ async fn handle_callback(
         strings: shared.strings.clone(),
         client_kind: kind,
         registry: shared.registry.clone(),
+        asst_dialog_id: shared.asst_dialog_id,
+        asst,
     };
 
     // Each assistant handler reports whether it owned the data.

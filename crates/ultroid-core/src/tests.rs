@@ -6,11 +6,16 @@ use crate::context::{ChatType, ClientKind, Ctx, Responder};
 use crate::db::local::{LocalJsonDb, MemoryDb};
 use crate::db::Database;
 use crate::error::Result;
+use crate::ops::{
+    AdminRights, BannedRights, BoostStatus, ChatSummary, DialogInfo, MessageSummary,
+    ParticipantInfo, StickerSetInfo, ThemeInfo, UserSummary, WallpaperInfo,
+};
 use crate::rich::RichDoc;
+use crate::tg::InlineButton;
 use crate::router::{CommandDef, CommandHandler, DispatchOutcome, Registry};
 use crate::strings::Strings;
 use async_trait::async_trait;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 struct NullResponder;
@@ -40,6 +45,135 @@ impl Responder for NullResponder {
     }
     fn chat_id(&self) -> i64 {
         1
+    }
+    async fn download_media(&self, _chat_id: i64, _msg_id: i32, _dest: &Path) -> Result<PathBuf> {
+        Err(crate::Error::Other("NullResponder: no Telegram client".into()))
+    }
+    async fn message_summary(&self, _chat_id: i64, _msg_id: i32) -> Result<Option<MessageSummary>> {
+        Err(crate::Error::Other("NullResponder: no Telegram client".into()))
+    }
+    async fn resolve_user(&self, _query: &str) -> Result<UserSummary> {
+        Err(crate::Error::Other("NullResponder: no Telegram client".into()))
+    }
+    async fn user_full(&self, _dialog_id: i64) -> Result<UserSummary> {
+        Err(crate::Error::Other("NullResponder: no Telegram client".into()))
+    }
+    async fn chat_info(&self, _dialog_id: i64) -> Result<ChatSummary> {
+        Err(crate::Error::Other("NullResponder: no Telegram client".into()))
+    }
+    async fn me(&self) -> Result<UserSummary> {
+        Err(crate::Error::Other("NullResponder: no Telegram client".into()))
+    }
+    async fn dialogs(&self) -> Result<Vec<DialogInfo>> {
+        Err(crate::Error::Other("NullResponder: no Telegram client".into()))
+    }
+    async fn send_to(&self, _dialog_id: i64, _text: &str) -> Result<i64> {
+        Err(crate::Error::Other("NullResponder: no Telegram client".into()))
+    }
+    async fn send_html_to(&self, _dialog_id: i64, _html: &str) -> Result<i64> {
+        Err(crate::Error::Other("NullResponder: no Telegram client".into()))
+    }
+    async fn send_file_to(&self, _dialog_id: i64, _path: &Path, _caption: &str) -> Result<i64> {
+        Err(crate::Error::Other("NullResponder: no Telegram client".into()))
+    }
+    async fn send_markup_to(&self, _dialog_id: i64, _text: &str, _buttons: Vec<Vec<InlineButton>>) -> Result<i64> {
+        Err(crate::Error::Other("NullResponder: no Telegram client".into()))
+    }
+    async fn send_poll(&self, _dialog_id: i64, _question: &str, _options: Vec<String>, _multiple: bool, _quiz: bool) -> Result<i64> {
+        Err(crate::Error::Other("NullResponder: no Telegram client".into()))
+    }
+    async fn send_scheduled(&self, _dialog_id: i64, _text: &str, _delay_secs: u64) -> Result<i64> {
+        Err(crate::Error::Other("NullResponder: no Telegram client".into()))
+    }
+    async fn send_effect(&self, _dialog_id: i64, _text: &str, _effect_id: i64) -> Result<i64> {
+        Err(crate::Error::Other("NullResponder: no Telegram client".into()))
+    }
+    async fn send_geo_live(&self, _dialog_id: i64, _latitude: f64, _longitude: f64, _period_secs: i32) -> Result<i64> {
+        Err(crate::Error::Other("NullResponder: no Telegram client".into()))
+    }
+    async fn forward_to(&self, _from_dialog_id: i64, _msg_id: i32, _to_dialog_id: i64) -> Result<i64> {
+        Err(crate::Error::Other("NullResponder: no Telegram client".into()))
+    }
+    async fn delete_from(&self, _dialog_id: i64, _msg_ids: &[i32]) -> Result<()> {
+        Err(crate::Error::Other("NullResponder: no Telegram client".into()))
+    }
+    async fn pin_message(&self, _dialog_id: i64, _msg_id: i32, _silent: bool) -> Result<()> {
+        Err(crate::Error::Other("NullResponder: no Telegram client".into()))
+    }
+    async fn unpin_message(&self, _dialog_id: i64, _msg_id: i32) -> Result<()> {
+        Err(crate::Error::Other("NullResponder: no Telegram client".into()))
+    }
+    async fn unpin_all(&self, _dialog_id: i64) -> Result<()> {
+        Err(crate::Error::Other("NullResponder: no Telegram client".into()))
+    }
+    async fn ban_user(&self, _chat_id: i64, _user_id: i64, _rights: BannedRights) -> Result<()> {
+        Err(crate::Error::Other("NullResponder: no Telegram client".into()))
+    }
+    async fn unban_user(&self, _chat_id: i64, _user_id: i64) -> Result<()> {
+        Err(crate::Error::Other("NullResponder: no Telegram client".into()))
+    }
+    async fn promote_user(&self, _chat_id: i64, _user_id: i64, _rights: AdminRights, _rank: &str) -> Result<()> {
+        Err(crate::Error::Other("NullResponder: no Telegram client".into()))
+    }
+    async fn edit_default_rights(&self, _chat_id: i64, _rights: BannedRights) -> Result<()> {
+        Err(crate::Error::Other("NullResponder: no Telegram client".into()))
+    }
+    async fn participants(&self, _chat_id: i64, _limit: i32, _offset: i32) -> Result<(Vec<ParticipantInfo>, i32)> {
+        Err(crate::Error::Other("NullResponder: no Telegram client".into()))
+    }
+    async fn set_archived(&self, _dialog_id: i64, _archived: bool) -> Result<()> {
+        Err(crate::Error::Other("NullResponder: no Telegram client".into()))
+    }
+    async fn update_profile(&self, _first_name: Option<&str>, _last_name: Option<&str>, _about: Option<&str>) -> Result<()> {
+        Err(crate::Error::Other("NullResponder: no Telegram client".into()))
+    }
+    async fn upload_profile_photo(&self, _path: &Path) -> Result<()> {
+        Err(crate::Error::Other("NullResponder: no Telegram client".into()))
+    }
+    async fn delete_profile_photos(&self, _limit: i32) -> Result<i32> {
+        Err(crate::Error::Other("NullResponder: no Telegram client".into()))
+    }
+    async fn download_profile_photos(&self, _dialog_id: i64, _dir: &Path, _limit: i32) -> Result<Vec<PathBuf>> {
+        Err(crate::Error::Other("NullResponder: no Telegram client".into()))
+    }
+    async fn inline_query_click(&self, _bot_dialog_id: i64, _query: &str, _chat_id: i64, _reply_to: Option<i32>) -> Result<()> {
+        Err(crate::Error::Other("NullResponder: no Telegram client".into()))
+    }
+    async fn boost_status(&self, _dialog_id: i64) -> Result<BoostStatus> {
+        Err(crate::Error::Other("NullResponder: no Telegram client".into()))
+    }
+    async fn apply_boost(&self, _dialog_id: i64) -> Result<()> {
+        Err(crate::Error::Other("NullResponder: no Telegram client".into()))
+    }
+    async fn delete_stories(&self, _story_ids: Vec<i32>) -> Result<()> {
+        Err(crate::Error::Other("NullResponder: no Telegram client".into()))
+    }
+    async fn set_story_stealth(&self, _enabled: bool) -> Result<()> {
+        Err(crate::Error::Other("NullResponder: no Telegram client".into()))
+    }
+    async fn post_story(&self, _chat_id: i64, _msg_id: i32, _caption: &str) -> Result<()> {
+        Err(crate::Error::Other("NullResponder: no Telegram client".into()))
+    }
+    async fn my_sticker_sets(&self) -> Result<Vec<StickerSetInfo>> {
+        Err(crate::Error::Other("NullResponder: no Telegram client".into()))
+    }
+    async fn sticker_set(&self, _short_name: &str) -> Result<StickerSetInfo> {
+        Err(crate::Error::Other("NullResponder: no Telegram client".into()))
+    }
+    async fn add_document_to_sticker_set(&self, _chat_id: i64, _msg_id: i32, _short_name: &str, _emoji: &str) -> Result<()> {
+        Err(crate::Error::Other("NullResponder: no Telegram client".into()))
+    }
+    async fn list_wallpapers(&self) -> Result<Vec<WallpaperInfo>> {
+        Err(crate::Error::Other("NullResponder: no Telegram client".into()))
+    }
+    async fn upload_wallpaper(&self, _path: &Path) -> Result<()> {
+        Err(crate::Error::Other("NullResponder: no Telegram client".into()))
+    }
+    async fn list_themes(&self) -> Result<Vec<ThemeInfo>> {
+        Err(crate::Error::Other("NullResponder: no Telegram client".into()))
+    }
+    async fn set_chat_theme(&self, _dialog_id: i64, _theme_slug: &str) -> Result<()> {
+        Err(crate::Error::Other("NullResponder: no Telegram client".into()))
     }
 }
 
@@ -113,6 +247,7 @@ fn test_ctx(text: &str, owner: bool) -> Ctx {
         message_id: 1,
         reply_to_id: None,
         reply_to_text: None,
+        reply_to_sender_id: None,
         is_owner: owner,
         is_sudo: false,
         is_dev: false,
@@ -126,6 +261,8 @@ fn test_ctx(text: &str, owner: bool) -> Ctx {
         strings: Strings::load("en"),
         client_kind: ClientKind::User,
         registry: Arc::new(Registry::new()),
+        asst_dialog_id: None,
+        asst: None,
     }
 }
 

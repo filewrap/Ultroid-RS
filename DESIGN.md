@@ -270,11 +270,20 @@ assistant inline-query op (responder-op pass).
 Known gaps to close before push (integration pass, after waves land):
 1. InlineQuery/InlineSend/GuestChatQuery routing to the
    `plugins::inline` engine (wave C defines its binary hook).
-2. `TODO(responder-op)` sites in plugins: extend the `Responder`
-   trait with the raw-MTProto operations plugins need (admin actions,
-   message/media fetch, chat info), implement them in the binary's
-   responder, and wire each site. Deferred deps decided then too:
-   `imageproc` + `ab_glyph` (text-on-image), `rqrr` (QR decode).
+2. `TODO(responder-op)` sites in plugins: the `Responder` trait now
+   carries the full op surface (43 methods in `core::context`, plain
+   data in `core::ops`) and the binary implements all of them in
+   `responder_ops.rs` (verified against grammers 0.12.0 + layer-233 TL;
+   `Ctx` now also carries `reply_to_sender_id`, `asst_dialog_id` and an
+   `asst` responder). Remaining: wire the ~370 plugin sites to the new
+   methods (delegate by family), then the VC actor handle (`VcControl`
+   via an mpsc channel into the engine thread) and the deferred deps
+   (`imageproc` + `ab_glyph` for text-on-image, `rqrr` for QR decode).
+   Layer-233 facts learned while writing the impl: `SetChatTheme`
+   takes an emoticon-based `InputChatTheme`, not `InputTheme`;
+   `messages::ChatFull` has a single `Full` variant; grammers'
+   `PhotoSize::make_from` is `pub(crate)` (the binary implements
+   `Downloadable` itself for profile-photo thumbs).
 3. Bare `.help` needs the assistant inline-query op (responder-op
    pass); `.help <plugin|command>` is wired on the help listing.
 4. `cargo build` (full workspace) + `cargo test`, README counts
