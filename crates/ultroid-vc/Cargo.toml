@@ -1,0 +1,25 @@
+[package]
+name = "ultroid-vc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ultroid-core.workspace = true
+tokio.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+async-trait.workspace = true
+rand.workspace = true
+regex.workspace = true
+sha1.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+grammers-client.workspace = true
+grammers-mtsender.workspace = true
+grammers-tl-types.workspace = true
+# Voice audio engine: the official ntgcalls Rust crate (WebRTC/SRTP/Opus).
+# Its build needs the prebuilt static lib: run scripts/fetch-ntgcalls.sh
+# and export NTGCALLS_LIB_DIR=$PWD/vendor/ntgcalls-lib/lib before building.
+ntgcalls.workspace = true

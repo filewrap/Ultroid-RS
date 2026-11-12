@@ -1,0 +1,17 @@
+# Rust build outputs
+/target/
+**/target/
+
+# Env / sessions / local state (never commit)
+.env
+.env.*
+!.env.example
+*.localdb.json
+sessions/
+*.session
+*.db
+*.db-journal
+*.log
+.DS_Store
+# ntgcalls static libs (downloaded by scripts/fetch-ntgcalls.sh; never commit)
+vendor/

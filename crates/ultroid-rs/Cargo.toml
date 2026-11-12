@@ -1,0 +1,27 @@
+[package]
+name = "ultroid-rs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "ultroid-rs"
+path = "src/main.rs"
+
+[dependencies]
+ultroid-core.workspace = true
+ultroid-rich.workspace = true
+ultroid-plugins.workspace = true
+ultroid-assistant.workspace = true
+ultroid-vc.workspace = true
+ultroid-agent.workspace = true
+ultroid-web.workspace = true
+grammers-client.workspace = true
+grammers-session.workspace = true
+grammers-mtsender.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true

@@ -1,0 +1,58 @@
+[workspace]
+members = [
+    "crates/ultroid-core",
+    "crates/ultroid-rich",
+    "crates/ultroid-vc",
+]
+# NOTE (build order, user rule "new functions first"): `ultroid-rs` (binary),
+# `ultroid-plugins`, `ultroid-assistant`, `ultroid-agent` and `ultroid-web`
+# re-join `members` once their real code lands; they are not listed with
+# placeholder targets — no stubs, ever.
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-or-later"
+authors = ["filewrap"]
+
+[workspace.dependencies]
+tokio = { version = "1", features = ["full"] }
+grammers-client = { version = "=0.12.0", features = ["markdown", "html"] }
+grammers-session = "=0.12.0"
+grammers-mtsender = "=0.12.0"
+# TL layer 233, pinned exactly (user rule: never downgrade to 230, never mix 0.11/0.12).
+grammers-tl-types = "=0.12.0"
+ntgcalls = "3.0.7"
+regex = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+async-trait = "0.1"
+anyhow = "1"
+thiserror = "2"
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+axum = "0.8"
+dotenvy = "0.15"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4"] }
+rand = "0.8"
+sha1 = "0.10"
+base64 = "0.22"
+url = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+redis = { version = "0.32", features = ["tokio-comp"] }
+mongodb = "3"
+tokio-postgres = { version = "0.7", features = ["with-chrono-0_4"] }
+image = "0.25"
+qrcode = "0.14"
+futures = "0.3"
+
+ultroid-core = { path = "crates/ultroid-core" }
+ultroid-rich = { path = "crates/ultroid-rich" }
+ultroid-plugins = { path = "crates/ultroid-plugins" }
+ultroid-assistant = { path = "crates/ultroid-assistant" }
+ultroid-vc = { path = "crates/ultroid-vc" }
+ultroid-agent = { path = "crates/ultroid-agent" }
+ultroid-web = { path = "crates/ultroid-web" }
