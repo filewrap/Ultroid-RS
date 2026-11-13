@@ -30,7 +30,6 @@ ntgcalls = "3.0.7"
 regex = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-serde_yaml = "0.9"
 async-trait = "0.1"
 anyhow = "1"
 thiserror = "2"
