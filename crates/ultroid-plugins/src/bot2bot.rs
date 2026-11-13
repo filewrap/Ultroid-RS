@@ -70,9 +70,6 @@ impl Default for B2bConfig {
 
 #[derive(Debug, Clone)]
 struct B2bSession {
-    bot_id: i64,
-    chat_id: i64,
-    username: Option<String>,
     started_at: Instant,
     last_activity: Instant,
     turns: u32,
@@ -80,12 +77,9 @@ struct B2bSession {
 }
 
 impl B2bSession {
-    fn new(bot_id: i64, chat_id: i64, username: Option<String>) -> Self {
+    fn new() -> Self {
         let now = Instant::now();
         B2bSession {
-            bot_id,
-            chat_id,
-            username,
             started_at: now,
             last_activity: now,
             turns: 0,
@@ -221,12 +215,7 @@ impl Manager {
         self.sessions.len()
     }
 
-    fn start(
-        &mut self,
-        bot_id: i64,
-        chat_id: i64,
-        username: Option<String>,
-    ) -> std::result::Result<(), String> {
+    fn start(&mut self, bot_id: i64, chat_id: i64) -> std::result::Result<(), String> {
         if !self.cfg.enabled {
             return Err("bot-to-bot conversations are disabled".to_string());
         }
@@ -241,7 +230,7 @@ impl Manager {
             return Err("the maximum number of active conversations is reached".to_string());
         }
         self.sessions
-            .insert(key, B2bSession::new(bot_id, chat_id, username));
+            .insert(key, B2bSession::new());
         Ok(())
     }
 
@@ -574,7 +563,7 @@ async fn b2b_session(ctx: &Ctx) -> Result<()> {
     }
     let action = parts[1].as_str();
     let reference = parts[2].as_str();
-    let (bot_id, username) = resolve_bot_ref(ctx, reference).await?;
+    let (bot_id, _) = resolve_bot_ref(ctx, reference).await?;
     if !bot_client_ready(ctx) {
         ctx.reply("No assistant bot is configured; set BOT_TOKEN first.")
             .await?;
@@ -635,7 +624,7 @@ async fn b2b_session(ctx: &Ctx) -> Result<()> {
                 .await?;
             return Ok(());
         }
-        if let Err(e) = m.start(bot_id, chat_id, username) {
+        if let Err(e) = m.start(bot_id, chat_id) {
             ctx.reply(&e).await?;
             return Ok(());
         }

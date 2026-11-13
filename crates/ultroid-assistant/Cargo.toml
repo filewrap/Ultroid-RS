@@ -6,7 +6,6 @@ license.workspace = true
 
 [dependencies]
 ultroid-core.workspace = true
-ultroid-rich.workspace = true
 async-trait.workspace = true
 serde.workspace = true
 serde_json.workspace = true

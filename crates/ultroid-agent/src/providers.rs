@@ -901,14 +901,6 @@ impl OllamaProvider {
         self
     }
 
-    fn base_url(&self) -> String {
-        if let Some(b) = &self.explicit_base {
-            return b.clone();
-        }
-        read_field_sync(&self.config, "ollama", "BASE", None)
-            .unwrap_or_else(|| "http://localhost:11434".to_string())
-    }
-
     fn default_model_sync(&self) -> String {
         if let Some(m) = &self.explicit_model {
             return m.clone();
@@ -931,17 +923,6 @@ impl OllamaProvider {
             .unwrap_or_else(|| "http://localhost:11434".to_string())
     }
 
-    async fn default_model_async(&self) -> String {
-        if let Some(m) = &self.explicit_model {
-            return m.clone();
-        }
-        self.config
-            .config_field("ollama", "MODEL", None)
-            .await
-            .ok()
-            .flatten()
-            .unwrap_or_else(|| "llama3".to_string())
-    }
 
     /// Listing local tags is a read-only reachability check.
     async fn is_running(&self) -> bool {
@@ -1277,17 +1258,6 @@ impl AnthropicProvider {
             .flatten()
     }
 
-    async fn default_model_async(&self) -> String {
-        if let Some(m) = &self.explicit_model {
-            return m.clone();
-        }
-        self.config
-            .config_field("anthropic", "MODEL", None)
-            .await
-            .ok()
-            .flatten()
-            .unwrap_or_else(|| "claude-haiku-4-5-20251001".to_string())
-    }
 
     fn missing_key_error(&self) -> Error {
         let key = first_db_key("anthropic", "KEY").unwrap_or("AGENT_CLAUDE_KEY");
@@ -1639,17 +1609,6 @@ impl GeminiProvider {
             .flatten()
     }
 
-    async fn default_model_async(&self) -> String {
-        if let Some(m) = &self.explicit_model {
-            return m.clone();
-        }
-        self.config
-            .config_field("gemini", "MODEL", None)
-            .await
-            .ok()
-            .flatten()
-            .unwrap_or_else(|| "gemini-2.5-flash".to_string())
-    }
 
     fn missing_key_error(&self) -> Error {
         let key = first_db_key("gemini", "KEY").unwrap_or("AGENT_CLOUD_GEMINI_KEY");
@@ -2051,17 +2010,6 @@ impl GroqProvider {
             .flatten()
     }
 
-    async fn default_model_async(&self) -> String {
-        if let Some(m) = &self.explicit_model {
-            return m.clone();
-        }
-        self.config
-            .config_field("groq", "MODEL", None)
-            .await
-            .ok()
-            .flatten()
-            .unwrap_or_else(|| "llama-3.3-70b-versatile".to_string())
-    }
 
     fn missing_key_error(&self) -> Error {
         let key = first_db_key("groq", "KEY").unwrap_or("AGENT_CLOUD_GROQ_KEY");
@@ -2281,18 +2229,6 @@ impl OpenAiCompatInner {
             .or_else(|| self.default_base_url.map(|s| s.to_string()))
     }
 
-    async fn default_model_async(&self) -> String {
-        if let Some(m) = &self.explicit_model {
-            return m.clone();
-        }
-        self.config
-            .config_field(self.config_provider, "MODEL", None)
-            .await
-            .ok()
-            .flatten()
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| self.fallback_model.to_string())
-    }
 
     fn api_key_sync(&self) -> Option<String> {
         if let Some(k) = &self.explicit_key {

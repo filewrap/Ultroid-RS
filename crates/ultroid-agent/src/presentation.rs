@@ -109,14 +109,6 @@ pub enum NodeChild {
 }
 
 impl Node {
-    fn new(tag: &str, attrs: Vec<(String, Option<String>)>) -> Self {
-        Node {
-            tag: tag.to_string(),
-            attrs,
-            children: Vec::new(),
-        }
-    }
-
     pub fn attr(&self, name: &str) -> Option<&str> {
         self.children_attr(name)
     }
@@ -747,7 +739,7 @@ fn markdown_links(text: &str) -> Vec<String> {
 pub fn native_answer(response: &dyn AnswerSource) -> Result<NativeAnswer> {
     let markup = render_answer(response);
     let mut urls: Vec<String> = Vec::new();
-    let mut body: Vec<PageBlock> = Vec::new();
+    let mut body: Vec<PageBlock>;
     if markup.format == RichFormat::Html {
         let tree = HtmlTree::parse(&markup.text)?;
         body = blocks_nodes(&tree.children);

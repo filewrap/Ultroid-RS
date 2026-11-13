@@ -27,7 +27,7 @@ use std::sync::OnceLock;
 use tokio::process::Command as ProcCommand;
 use tokio::sync::Mutex;
 use ultroid_core::vc::{VcHandle, VcTrack};
-use ultroid_core::{ChatType, Ctx, Error, Registry, Result, VcControl};
+use ultroid_core::{ChatType, Ctx, Error, Registry, Result};
 use ultroid_vc::dataclass::{CachedTrack, ChannelPlay};
 use ultroid_vc::messages as msg;
 use ultroid_vc::player::{PlayerRegistry, PlayerState};

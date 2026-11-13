@@ -118,10 +118,6 @@ pub async fn gbanned(ctx: &Ctx) -> Result<HashMap<String, String>> {
     Ok(db_get_json(&*ctx.db, "GBAN").await?.unwrap_or_default())
 }
 
-async fn set_gbanned(ctx: &Ctx, map: &HashMap<String, String>) -> Result<()> {
-    db_set_json(&*ctx.db, "GBAN", map).await
-}
-
 /// GMUTE list (Python `dbs.gban_mute.list_gmuted`).
 pub async fn gmuted(ctx: &Ctx) -> Result<Vec<i64>> {
     Ok(db_get_json(&*ctx.db, "GMUTE").await?.unwrap_or_default())

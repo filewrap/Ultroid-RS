@@ -11,6 +11,7 @@ is guessed.
 |---|---|
 | Rust toolchain, edition 2024 | `rustc` 1.85+ (edition 2024); the sandbox builds with 1.99.1. Install via [rustup](https://rustup.rs). |
 | `git`, `curl`, `unzip` | `curl` + `unzip` are needed for the vendor step below. |
+| System build libraries | A C compiler + linker and the zlib dev library — the final link needs `-lz`. Debian/Ubuntu: `sudo apt-get update && sudo apt-get install -y build-essential pkg-config zlib1g-dev`. Fedora: `sudo dnf install -y gcc pkg-config zlib-devel`. Alpine: `apk add build-base pkg-config zlib-dev`. Without `zlib1g-dev` the release build fails at link time with `rust-lld: error: unable to find library -lz` — that is a missing system package, not a code error. |
 | `ffmpeg` + `ffprobe` on `PATH` | Media plugins and voice chat probe/convert with them. |
 | `yt-dlp` on `PATH` | YouTube / media download plugins shell out to it. |
 | Telegram API id + hash | From https://my.telegram.org/apps — free, takes a minute. |
@@ -269,6 +270,7 @@ Session files and `.env` survive updates — they live outside git.
 
 | Symptom | Cause / fix |
 |---|---|
+| `rust-lld: error: unable to find library -lz` at link time (after everything compiles) | Missing zlib dev library on the host. Debian/Ubuntu: `sudo apt-get install -y zlib1g-dev`, then re-run `cargo build --release`. Fedora: `zlib-devel`; Alpine: `zlib-dev`. Nothing in the repo changed — this is a system package. |
 | `failed to fetch ... ntgcalls...-static_libs.zip: invalid peer certificate: UnknownIssuer` | The build tried to download the lib itself. Run `./scripts/fetch-ntgcalls.sh` and `export NTGCALLS_LIB_DIR="$PWD/vendor/ntgcalls-lib/lib"` before building. |
 | `cargo build` fails in `ntgcalls-sys` | Same as above — `NTGCALLS_LIB_DIR` is unset or points at the wrong dir. Check `ls vendor/ntgcalls-lib/lib/libntgcalls.a`. |
 | `unsupported platform` from the fetch script | Your OS/arch isn't in the script's list (Linux x86_64/arm64, macOS arm64). Download the matching release zip by hand (section 3) or build ntgcalls from source (needs `libpulse-dev` + a C++ toolchain). |

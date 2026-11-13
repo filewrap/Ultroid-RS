@@ -38,6 +38,8 @@ impl GrammersResponder {
     /// Build a responder for a peer id when no cached `PeerRef` exists.
     /// Uses ambient authority: the peer must already be known to the
     /// session cache (dialogs are warmed after login for this reason).
+    /// Intentional API for later responder wiring; currently uncalled.
+    #[allow(dead_code)]
     pub fn from_peer_id(
         client: Client,
         peer_id: grammers_client::session::types::PeerId,

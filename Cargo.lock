@@ -4136,7 +4136,6 @@ dependencies = [
  "serde_json",
  "tokio",
  "ultroid-core",
- "ultroid-rich",
 ]
 
 [[package]]
@@ -4186,7 +4185,6 @@ dependencies = [
  "tracing",
  "ultroid-agent",
  "ultroid-core",
- "ultroid-rich",
  "ultroid-vc",
  "url",
  "uuid",
