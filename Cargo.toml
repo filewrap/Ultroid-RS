@@ -59,3 +59,6 @@ ultroid-assistant = { path = "crates/ultroid-assistant" }
 ultroid-vc = { path = "crates/ultroid-vc" }
 ultroid-agent = { path = "crates/ultroid-agent" }
 ultroid-web = { path = "crates/ultroid-web" }
+
+[patch.crates-io]
+grammers-mtsender = { path = "vendor/grammers-mtsender" }

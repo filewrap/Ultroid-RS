@@ -177,9 +177,8 @@ async fn alive(ctx: &Ctx) -> Result<()> {
     let html_text = format!(
         "<blockquote expandable><b>{an}</b></blockquote>\n\n\
          <b>✦ Version</b> - <code>{ULTROID_VERSION} [{}]</code>\n\
-         <b>✦ Python</b> - <code>Rust (grammers)</code>\n\
          <b>✦ Uptime</b> - <code>{uptime}</code>\n\
-         <b>✦ Telethon</b> - <code>{}</code>\n\
+         <b>✦ Client</b> - <code>{}</code>\n\
          <b>✦ Plugins</b> - <code>—</code>\n\
          <b>✦ Addons</b> - <code>—</code>\n\
          <b>✦ Branch</b> - <code>{branch}</code>\n\n\
