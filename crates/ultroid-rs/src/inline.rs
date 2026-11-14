@@ -246,8 +246,7 @@ pub async fn handle_inline_query(
             }
             let article = Article::new(
                 "Ultroid Op",
-                InputMessage::new()
-                    .text(&text)
+                crate::markdown::md_input(&text)
                     .reply_markup(to_reply_markup(&convert_buttons(&res.buttons))),
             )
             .description("@TeamUltroid");

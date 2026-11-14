@@ -15,6 +15,7 @@
 mod clients;
 mod inline;
 mod login;
+mod markdown;
 mod responder;
 mod responder_ops;
 mod vc_control;

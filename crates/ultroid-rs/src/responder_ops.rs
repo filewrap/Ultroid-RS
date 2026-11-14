@@ -29,6 +29,7 @@
 //! `Error::Telegram`; a missing message/peer is `Error::Other` naming it.
 
 use super::responder::{GrammersResponder, telegram};
+use crate::markdown::md_input;
 use async_trait::async_trait;
 use grammers_client::{
     Client,
@@ -289,7 +290,7 @@ impl Responder for GrammersResponder {
     async fn reply(&self, text: &str) -> Result<i64> {
         let msg = self
             .client()
-            .send_message(self.peer(), InputMessage::new().text(text))
+            .send_message(self.peer(), md_input(text))
             .await
             .map_err(telegram)?;
         Ok(msg.id() as i64)
@@ -306,7 +307,7 @@ impl Responder for GrammersResponder {
 
     async fn edit(&self, msg_id: i64, text: &str) -> Result<()> {
         self.client()
-            .edit_message(self.peer(), msg_id as i32, InputMessage::new().text(text))
+            .edit_message(self.peer(), msg_id as i32, md_input(text))
             .await
             .map_err(telegram)?;
         Ok(())
@@ -351,10 +352,7 @@ impl Responder for GrammersResponder {
         let uploaded = self.client().upload_file(path).await.map_err(telegram)?;
         let msg = self
             .client()
-            .send_message(
-                self.peer(),
-                InputMessage::new().text(caption).file(uploaded),
-            )
+            .send_message(self.peer(), md_input(caption).file(uploaded))
             .await
             .map_err(telegram)?;
         Ok(msg.id() as i64)
@@ -544,7 +542,7 @@ impl Responder for GrammersResponder {
         let peer = resolve_ref(self.client(), dialog_id).await?;
         let msg = self
             .client()
-            .send_message(peer, InputMessage::new().text(text))
+            .send_message(peer, md_input(text))
             .await
             .map_err(telegram)?;
         Ok(msg.id() as i64)
@@ -565,7 +563,7 @@ impl Responder for GrammersResponder {
         let uploaded = self.client().upload_file(path).await.map_err(telegram)?;
         let msg = self
             .client()
-            .send_message(peer, InputMessage::new().text(caption).file(uploaded))
+            .send_message(peer, md_input(caption).file(uploaded))
             .await
             .map_err(telegram)?;
         Ok(msg.id() as i64)
@@ -582,9 +580,7 @@ impl Responder for GrammersResponder {
             .client()
             .send_message(
                 peer,
-                InputMessage::new()
-                    .text(text)
-                    .reply_markup(ultroid_rich::to_reply_markup(&buttons)),
+                md_input(text).reply_markup(ultroid_rich::to_reply_markup(&buttons)),
             )
             .await
             .map_err(telegram)?;
@@ -671,10 +667,7 @@ impl Responder for GrammersResponder {
         let when = SystemTime::now() + Duration::from_secs(delay_secs);
         let msg = self
             .client()
-            .send_message(
-                peer,
-                InputMessage::new().text(text).schedule_date(Some(when)),
-            )
+            .send_message(peer, md_input(text).schedule_date(Some(when)))
             .await
             .map_err(telegram)?;
         Ok(msg.id() as i64)
@@ -682,6 +675,9 @@ impl Responder for GrammersResponder {
 
     async fn send_effect(&self, dialog_id: i64, text: &str, effect_id: i64) -> Result<i64> {
         let peer = resolve_ref(self.client(), dialog_id).await?;
+        // Raw invoke has no InputMessage builder: parse here and pass the
+        // entities explicitly.
+        let (message, entities) = crate::markdown::parse_markdown(text);
         let updates = self
             .client()
             .invoke(&tl::functions::messages::SendMessage {
@@ -695,10 +691,14 @@ impl Responder for GrammersResponder {
                 allow_paid_floodskip: false,
                 peer: peer.into(),
                 reply_to: None,
-                message: text.to_string(),
+                message,
                 random_id: random_id(),
                 reply_markup: None,
-                entities: None,
+                entities: if entities.is_empty() {
+                    None
+                } else {
+                    Some(entities)
+                },
                 schedule_date: None,
                 schedule_repeat_period: None,
                 send_as: None,
@@ -1260,6 +1260,7 @@ impl Responder for GrammersResponder {
 
     async fn post_story(&self, chat_id: i64, msg_id: i32, caption: &str) -> Result<()> {
         let msg = fetch_message(self.client(), chat_id, msg_id).await?;
+        let (caption, caption_entities) = crate::markdown::parse_markdown(caption);
         // Re-use the existing photo/document by reference instead of a
         // download + re-upload round-trip — the server result is the same.
         let media = match msg.media() {
@@ -1311,9 +1312,13 @@ impl Responder for GrammersResponder {
                 caption: if caption.is_empty() {
                     None
                 } else {
-                    Some(caption.to_string())
+                    Some(caption)
                 },
-                entities: None,
+                entities: if caption_entities.is_empty() {
+                    None
+                } else {
+                    Some(caption_entities)
+                },
                 // Public visibility, like Python's default story post.
                 privacy_rules: vec![tl::enums::InputPrivacyRule::InputPrivacyValueAllowAll],
                 random_id: random_id(),
