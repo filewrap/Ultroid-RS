@@ -130,6 +130,14 @@ pub async fn handle_inline_query(
     // gets no answer at all (the client shows no results).
     let sender = query.sender_id().bot_api_dialog_id().unwrap_or(-1);
     if shared.config.owner_id == 0 || sender != shared.config.owner_id {
+        // Never silent: an unanswered inline query looks exactly like a
+        // broken bot from the user's side (the command falls back to a
+        // plain user send). Log why nothing was answered.
+        tracing::warn!(
+            "ignoring inline query '{}' from {sender} (owner_id is {})",
+            query.text(),
+            shared.config.owner_id
+        );
         return Ok(());
     }
     let (official, addons) = plugin_counts(&shared.registry.help_listing());

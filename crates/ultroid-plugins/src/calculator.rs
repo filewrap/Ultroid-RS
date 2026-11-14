@@ -166,7 +166,13 @@ async fn calc(ctx: &Ctx) -> Result<()> {
             ));
         };
         ctx.responder
-            .inline_query_click(asst_id, "calc", ctx.chat_id, None)
+            .inline_query_click(
+                asst_id,
+                ctx.asst_username.as_deref(),
+                "calc",
+                ctx.chat_id,
+                None,
+            )
             .await?;
         return Ok(());
     }

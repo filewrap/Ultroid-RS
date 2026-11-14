@@ -153,7 +153,7 @@ async fn alive(ctx: &Ctx) -> Result<()> {
             ));
         };
         ctx.responder
-            .inline_query_click(asst_id, "alive", ctx.chat_id, None)
+            .inline_query_click(asst_id, ctx.asst_username.as_deref(), "alive", ctx.chat_id, None)
             .await?;
         return Ok(());
     }

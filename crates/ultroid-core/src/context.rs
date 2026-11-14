@@ -186,10 +186,14 @@ pub trait Responder: Send + Sync {
     /// Run an inline query against a bot and click the first result into
     /// `chat_id` (`messages.GetInlineBotResults` + `SendInlineBotResult`
     /// with `reply_to`, mirroring Telethon's `result.click(...)`).
-    /// `bot_dialog_id` is the bot's bot API dialog id.
+    /// `bot_dialog_id` is the bot's bot API dialog id. `bot_username`
+    /// (without `@`) is the server-side fallback when the bot is not in
+    /// the local peer cache — Telethon's `get_input_entity` resolves an
+    /// unseen bot by username, grammers' id-only lookup cannot.
     async fn inline_query_click(
         &self,
         bot_dialog_id: i64,
+        bot_username: Option<&str>,
         query: &str,
         chat_id: i64,
         reply_to: Option<i32>,

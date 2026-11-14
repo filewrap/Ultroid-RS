@@ -334,7 +334,13 @@ async fn help(ctx: &Ctx) -> Result<()> {
         ));
     };
     ctx.responder
-        .inline_query_click(asst_id, "ultd", ctx.chat_id, None)
+        .inline_query_click(
+            asst_id,
+            ctx.asst_username.as_deref(),
+            "ultd",
+            ctx.chat_id,
+            None,
+        )
         .await?;
     Ok(())
 }

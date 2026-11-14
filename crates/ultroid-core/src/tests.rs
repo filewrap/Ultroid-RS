@@ -248,6 +248,7 @@ impl Responder for NullResponder {
     async fn inline_query_click(
         &self,
         _bot_dialog_id: i64,
+        _bot_username: Option<&str>,
         _query: &str,
         _chat_id: i64,
         _reply_to: Option<i32>,

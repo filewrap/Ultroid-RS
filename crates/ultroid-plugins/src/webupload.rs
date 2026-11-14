@@ -676,6 +676,7 @@ async fn webupload_cmd(ctx: &Ctx) -> Result<()> {
         };
         asst.inline_query_click(
             bot_dialog_id,
+            ctx.asst_username.as_deref(),
             &format!("fl2lnk {cache_key}"),
             ctx.chat_id,
             ctx.reply_to_id.map(|id| id as i32),

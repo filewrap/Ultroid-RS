@@ -190,6 +190,7 @@ async fn gifs(ctx: &Ctx) -> Result<()> {
     ctx.responder
         .inline_query_click(
             gif.id,
+            Some("gif"),
             query,
             ctx.chat_id,
             ctx.reply_to_id.map(|id| id as i32),

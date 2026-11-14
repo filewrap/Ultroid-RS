@@ -49,6 +49,7 @@ async fn wspr(ctx: &Ctx) -> Result<()> {
     ctx.responder
         .inline_query_click(
             asst_id,
+            ctx.asst_username.as_deref(),
             &format!("msg {put}"),
             ctx.chat_id,
             ctx.reply_to_id.map(|id| id as i32),

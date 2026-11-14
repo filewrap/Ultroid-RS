@@ -83,7 +83,7 @@ async fn main() -> anyhow::Result<()> {
     // This never returns while setup is pending.
     ultroid_web::bootstrap().ensure().await?;
 
-    let config = Arc::new(Config::from_env()?);
+    let mut config = Config::from_env()?;
     let db = open_database(&config).await?;
     ultroid_agent::lifecycle::mark_lifecycle_registered();
 
@@ -123,6 +123,18 @@ async fn main() -> anyhow::Result<()> {
             .first_name()
             .map(str::to_string)
             .unwrap_or_else(|| "Owner".to_string());
+        // Python parity (runtime.py): OWNER_ID is the primary account's
+        // uid, not an env var. Without it the bot silently answers no
+        // inline query (owner gate in handle_inline_query) and no
+        // owner-only command runs — the classic "inline queries fail and
+        // everything falls back to a plain user send".
+        if config.owner_id == 0 {
+            config.owner_id = me.id().bot_api_dialog_id_unchecked();
+            tracing::info!(
+                "OWNER_ID not set; using signed-in user id {} as owner",
+                config.owner_id
+            );
+        }
         user_client = Some(connected.client.clone());
         connected_clients.push(connected);
     }
@@ -149,6 +161,19 @@ async fn main() -> anyhow::Result<()> {
         );
         asst_client = Some(connected.client.clone());
         connected_clients.push(connected);
+    } else {
+        // Without a bot there is no inline/rich delivery at all: bare
+        // .help, .alive inline, whispers and every rich send fall back
+        // to plain messages from the user account. Say so at startup
+        // instead of failing silently per command.
+        tracing::warn!(
+            "no BOT_TOKEN set: assistant bot disabled — inline results, rich messages and bare .help fall back to plain user sends"
+        );
+    }
+    if config.bot_mode && config.owner_id == 0 {
+        tracing::warn!(
+            "BOT_MODE with OWNER_ID unset: the assistant bot will answer no inline query (owner gate)"
+        );
     }
 
     // Extra user accounts.
@@ -208,6 +233,7 @@ async fn main() -> anyhow::Result<()> {
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
         .filter(|b| !b.is_empty())
         .unwrap_or_else(|| "unknown".to_string());
+    let config = Arc::new(config);
     let shared = Arc::new(Shared {
         config: config.clone(),
         db: db.clone(),

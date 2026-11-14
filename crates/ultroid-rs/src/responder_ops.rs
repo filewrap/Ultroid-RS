@@ -1137,6 +1137,7 @@ impl Responder for GrammersResponder {
     async fn inline_query_click(
         &self,
         bot_dialog_id: i64,
+        bot_username: Option<&str>,
         query: &str,
         chat_id: i64,
         reply_to: Option<i32>,
@@ -1145,7 +1146,29 @@ impl Responder for GrammersResponder {
         // query + click are raw invokes: `GetInlineBotResults` gives the
         // query id and the first result, `SendInlineBotResult` clicks it
         // into the chat (mirroring Telethon's `result.click(...)`).
-        let bot_ref = resolve_ref(self.client(), bot_dialog_id).await?;
+        let bot_ref = match resolve_ref(self.client(), bot_dialog_id).await {
+            Ok(r) => r,
+            Err(e) => {
+                // Telethon's `get_input_entity` falls back to a
+                // server-side username lookup when the bot is not in the
+                // local peer cache (a fresh setup has no dialog with the
+                // bot yet); grammers' id-only lookup cannot do that, so
+                // the query failed here before Telegram was ever asked.
+                let Some(username) = bot_username else {
+                    return Err(e);
+                };
+                let peer = self
+                    .client()
+                    .resolve_username(username)
+                    .await
+                    .map_err(telegram)?
+                    .ok_or_else(|| other(format!("bot @{username} not found")))?;
+                peer.to_ref()
+                    .await
+                    .map_err(telegram)?
+                    .ok_or_else(|| other(format!("bot @{username} could not be resolved")))?
+            }
+        };
         let bot_user: tl::enums::InputUser = (&bot_ref).into();
         let target = resolve_ref(self.client(), chat_id).await?;
         let target_peer: tl::enums::InputPeer = target.into();
@@ -1159,7 +1182,19 @@ impl Responder for GrammersResponder {
                 offset: String::new(),
             })
             .await
-            .map_err(telegram)?;
+            .map_err(|e| {
+                // Inline mode is a per-bot BotFather setting, not a code
+                // path: a fresh bot token has it OFF until someone runs
+                // /setinline. Say so plainly instead of a bare RPC name.
+                let msg = e.to_string();
+                if msg.contains("BOT_INLINE_DISABLED") {
+                    other(
+                        "inline mode is OFF for the assistant bot: open @BotFather, send /setinline, pick the bot, set a placeholder (e.g. \"Search\"), then retry the command",
+                    )
+                } else {
+                    telegram(e)
+                }
+            })?;
         let tl::enums::messages::BotResults::Results(r) = results;
         let first = r
             .results

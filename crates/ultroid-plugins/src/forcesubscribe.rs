@@ -223,6 +223,7 @@ pub async fn enforce_forcesub(
     ctx.responder
         .inline_query_click(
             asst_id,
+            ctx.asst_username.as_deref(),
             &format!("fsub {user_id}_{channel_id}"),
             chat_id,
             None,

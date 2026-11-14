@@ -56,7 +56,13 @@ async fn repo(ctx: &Ctx) -> Result<()> {
     if let Some(asst_id) = ctx.asst_dialog_id {
         if ctx
             .responder
-            .inline_query_click(asst_id, "", ctx.chat_id, None)
+            .inline_query_click(
+                asst_id,
+                ctx.asst_username.as_deref(),
+                "",
+                ctx.chat_id,
+                None,
+            )
             .await
             .is_ok()
         {
