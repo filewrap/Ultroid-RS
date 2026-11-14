@@ -417,7 +417,11 @@ impl SenderPoolRunner {
         let address = if self.connection_params.use_ipv6 {
             dc_option.ipv6.into()
         } else {
-            dc_option.ipv4.into()
+            // Some egress proxies (e.g. Instabox) transparently intercept :443
+            // and kill non-TLS payloads; Telegram DCs also serve MTProto on :80.
+            let mut a = dc_option.ipv4;
+            a.set_port(80);
+            a.into()
         };
 
         #[cfg(feature = "proxy")]
