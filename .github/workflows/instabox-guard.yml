@@ -10,7 +10,8 @@ jobs:
     timeout-minutes: 5
     steps:
       - name: ping port endpoint (external traffic counts as use)
-        run: curl -s -o /dev/null -w "ping: HTTP %{http_code}\n" -m 20 https://6969-agq3lyj6bjtya2d7yswujhmske.instabox.tech/ || true
+        run: |
+          curl -s -o /dev/null -w "ping: HTTP %{http_code}\n" -m 20 https://6969-agq3lyj6bjtya2d7yswujhmske.instabox.tech/ || true
 
       - name: run-age guard (reset before the 480-min ceiling, resume if paused)
         env:
