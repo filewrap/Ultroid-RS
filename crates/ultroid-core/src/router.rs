@@ -2,7 +2,7 @@
 //! (`PatternCompiler`, `ultroid_cmd` gates) and the dispatcher fan-out
 //! in `pyUltroid/startup/dispatcher.py`.
 
-use crate::context::Ctx;
+use crate::context::{ClientKind, Ctx};
 use crate::error::{Error, Result};
 use async_trait::async_trait;
 use regex::Regex;
@@ -179,6 +179,20 @@ impl Registry {
             if ctx.via_bot {
                 return Ok(DispatchOutcome::Denied("via_bot".into()));
             }
+            // Dispatcher-level gate (Python
+            // `dispatcher.py::_dispatch_command`): the userbot only ever
+            // runs commands from the owner or a sudo. Per-command flags
+            // below refine this; they never widen it. The assistant bot
+            // is exempt: its `/` commands are public by design (Python
+            // `asst_cmd` defaults `owner=False`).
+            if ctx.client_kind != ClientKind::AsstBot
+                && !(ctx.is_owner || ctx.is_sudo)
+                && !(def.allow_guest && ctx.is_guest)
+            {
+                return Ok(self
+                    .deny(ctx, def, "only the owner and sudos may use this command")
+                    .await);
+            }
             // Gates (order mirrors the decorator wrapper).
             if def.only_devs && !ctx.is_dev {
                 return Ok(self.deny(ctx, def, "only devs may use this command").await);
@@ -196,15 +210,6 @@ impl Registry {
                 && !matches!(ctx.chat_type, crate::context::ChatType::Group | crate::context::ChatType::Supergroup)
             {
                 return Ok(self.deny(ctx, def, "this command works only in groups").await);
-            }
-            if def.allow_guest && ctx.is_guest {
-                // guests pass; non-guest non-owner non-sudo are denied
-                if !(ctx.is_owner || ctx.is_sudo) {
-                    return Ok(self.deny(ctx, def, "guests only").await);
-                }
-            }
-            if ctx.is_guest && !def.allow_guest && !ctx.is_owner && !ctx.is_sudo {
-                return Ok(self.deny(ctx, def, "guests may not use this command").await);
             }
             if def.admins_only && !(ctx.is_owner || ctx.is_sudo) {
                 // Full admin check needs a Telegram call; the binary fills

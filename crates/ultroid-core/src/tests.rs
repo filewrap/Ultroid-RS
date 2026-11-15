@@ -358,7 +358,7 @@ impl CommandHandler for Ping {
     }
 }
 
-fn test_ctx(text: &str, owner: bool) -> Ctx {
+fn test_ctx(text: &str, owner: bool, sudo: bool, guest: bool, kind: ClientKind) -> Ctx {
     let cfg = Arc::new(Config {
         api_id: 123,
         api_hash: "hash".into(),
@@ -421,9 +421,9 @@ fn test_ctx(text: &str, owner: bool) -> Ctx {
         reply_to_text: None,
         reply_to_sender_id: None,
         is_owner: owner,
-        is_sudo: false,
+        is_sudo: sudo,
         is_dev: false,
-        is_guest: false,
+        is_guest: guest,
         via_bot: false,
         db: Arc::new(MemoryDb::new()),
         config: cfg,
@@ -431,7 +431,7 @@ fn test_ctx(text: &str, owner: bool) -> Ctx {
         responder: Arc::new(NullResponder),
         lang: "en".into(),
         strings: Strings::load("en"),
-        client_kind: ClientKind::User,
+        client_kind: kind,
         registry: Arc::new(Registry::new()),
         asst_dialog_id: None,
         asst_username: None,
@@ -453,7 +453,7 @@ async fn router_matches_dot_and_slash_prefixes() {
         Arc::new(Ping),
     );
     for text in [".ping", "/ping"] {
-        let mut ctx = test_ctx(text, true);
+        let mut ctx = test_ctx(text, true, false, false, ClientKind::User);
         assert!(
             matches!(
                 reg.dispatch(&mut ctx).await.unwrap(),
@@ -462,7 +462,7 @@ async fn router_matches_dot_and_slash_prefixes() {
             "{text} should match"
         );
     }
-    let mut ctx = test_ctx(".pong", true);
+    let mut ctx = test_ctx(".pong", true, false, false, ClientKind::User);
     assert!(matches!(
         reg.dispatch(&mut ctx).await.unwrap(),
         DispatchOutcome::NoMatch
@@ -481,7 +481,7 @@ async fn router_captures_args_like_python() {
         },
         Arc::new(Ping),
     );
-    let mut ctx = test_ctx(".alive hello", true);
+    let mut ctx = test_ctx(".alive hello", true, false, false, ClientKind::User);
     assert!(matches!(
         reg.dispatch(&mut ctx).await.unwrap(),
         DispatchOutcome::Matched
@@ -503,7 +503,129 @@ async fn router_owner_gate_denies_non_owner_silently() {
         },
         Arc::new(Ping),
     );
-    let mut ctx = test_ctx(".eval 1+1", false);
+    let mut ctx = test_ctx(".eval 1+1", false, false, false, ClientKind::User);
+    assert!(matches!(
+        reg.dispatch(&mut ctx).await.unwrap(),
+        DispatchOutcome::Denied(_)
+    ));
+}
+
+#[tokio::test]
+async fn router_default_gate_denies_stranger_on_user_client() {
+    // The hole: a plain `def()` command (owner_only=false, the default
+    // for nearly all 559 registrations) ran for anyone in any group or
+    // DM. Python's dispatcher returns early unless the sender is in
+    // owner_and_sudos(); the Rust port had no such gate.
+    let mut reg = Registry::new();
+    reg.add(
+        CommandDef {
+            name: "ping",
+            pattern: "ping$",
+            help: "ping",
+            ..Default::default()
+        },
+        Arc::new(Ping),
+    );
+    let mut ctx = test_ctx(".ping", false, false, false, ClientKind::User);
+    assert!(matches!(
+        reg.dispatch(&mut ctx).await.unwrap(),
+        DispatchOutcome::Denied(_)
+    ));
+}
+
+#[tokio::test]
+async fn router_default_gate_allows_owner_and_sudo() {
+    let mut reg = Registry::new();
+    reg.add(
+        CommandDef {
+            name: "ping",
+            pattern: "ping$",
+            help: "ping",
+            ..Default::default()
+        },
+        Arc::new(Ping),
+    );
+    let mut owner = test_ctx(".ping", true, false, false, ClientKind::User);
+    assert!(matches!(
+        reg.dispatch(&mut owner).await.unwrap(),
+        DispatchOutcome::Matched
+    ));
+    let mut sudo = test_ctx(".ping", false, true, false, ClientKind::User);
+    assert!(matches!(
+        reg.dispatch(&mut sudo).await.unwrap(),
+        DispatchOutcome::Matched
+    ));
+}
+
+#[tokio::test]
+async fn router_default_gate_allows_guest_only_on_guest_command() {
+    let mut reg = Registry::new();
+    reg.add(
+        CommandDef {
+            name: "guestcmd",
+            pattern: "guestcmd$",
+            help: "guest",
+            allow_guest: true,
+            ..Default::default()
+        },
+        Arc::new(Ping),
+    );
+    reg.add(
+        CommandDef {
+            name: "ping",
+            pattern: "ping$",
+            help: "ping",
+            ..Default::default()
+        },
+        Arc::new(Ping),
+    );
+    let mut guest_ok = test_ctx(".guestcmd", false, false, true, ClientKind::User);
+    assert!(matches!(
+        reg.dispatch(&mut guest_ok).await.unwrap(),
+        DispatchOutcome::Matched
+    ));
+    let mut guest_plain = test_ctx(".ping", false, false, true, ClientKind::User);
+    assert!(matches!(
+        reg.dispatch(&mut guest_plain).await.unwrap(),
+        DispatchOutcome::Denied(_)
+    ));
+}
+
+#[tokio::test]
+async fn router_default_gate_skips_assistant_bot() {
+    // The assistant bot's `/` commands are public by design (Python
+    // `asst_cmd` defaults `owner=False`); the gate is userbot-only.
+    let mut reg = Registry::new();
+    reg.add(
+        CommandDef {
+            name: "ping",
+            pattern: "ping$",
+            help: "ping",
+            ..Default::default()
+        },
+        Arc::new(Ping),
+    );
+    let mut ctx = test_ctx("/ping", false, false, false, ClientKind::AsstBot);
+    assert!(matches!(
+        reg.dispatch(&mut ctx).await.unwrap(),
+        DispatchOutcome::Matched
+    ));
+}
+
+#[tokio::test]
+async fn router_owner_only_still_denies_sudo() {
+    let mut reg = Registry::new();
+    reg.add(
+        CommandDef {
+            name: "eval",
+            pattern: "eval",
+            help: "eval",
+            owner_only: true,
+            ..Default::default()
+        },
+        Arc::new(Ping),
+    );
+    let mut ctx = test_ctx(".eval 1+1", false, true, false, ClientKind::User);
     assert!(matches!(
         reg.dispatch(&mut ctx).await.unwrap(),
         DispatchOutcome::Denied(_)
@@ -519,7 +641,7 @@ async fn rich_plain_text_fallback_strips_markers() {
 
 #[tokio::test]
 async fn rich_only_bot_refusal() {
-    let ctx = test_ctx(".x", true);
+    let ctx = test_ctx(".x", true, false, false, ClientKind::User);
     let doc = RichDoc::markdown("hi").unwrap();
     assert!(matches!(
         ctx.send_rich(&doc).await,
